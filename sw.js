@@ -1,6 +1,6 @@
-const CACHE = 'nexo-static-v38';
+const CACHE = 'nexo-static-v41';
 const FILES = [
-  './', './index.html', './styles.css?v=38', './app.js?v=38', './traveller-index.js?v=38', './traveller-pdf.js?v=38', './hangar.js?v=38', './manifest.webmanifest',
+  './', './index.html', './styles.css?v=41', './app.js?v=40', './traveller-index.js?v=38', './traveller-pdf.js?v=38', './hangar.js?v=38', './characters.js?v=2', './manifest.webmanifest',
   './icon.svg', './icon-192.png', './icon-512.png'
 ];
 self.addEventListener('install', event => {
@@ -20,4 +20,3 @@ self.addEventListener('fetch', event => {
     }).catch(() => request.mode === 'navigate' ? caches.match('./index.html') : Response.error());
   }));
 });
-
