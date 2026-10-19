@@ -1,99 +1,452 @@
-(() => {
-  const KEY='nexo-traveller-v1';
-  const bands=[[-Infinity,400,25], [0,300,45],[1,200,50],[2,175,55],[3,150,60],[4,135,65],[5,125,75],[6,120,80],[7,115,85],[8,110,90],[9,105,95],[10,100,100],[11,95,105],[12,90,110],[13,85,115],[14,80,120],[15,75,125],[16,70,135],[17,65,150],[18,55,175],[19,50,200],[20,40,300],[21,25,400]];
-  const categories={components_basic:'Componentes bÃ¡sicos',components_advanced:'Componentes avanzados',vehicles_basic:'VehÃ­culos bÃ¡sicos',vehicles_advanced:'VehÃ­culos avanzados',minerals_basic:'Minerales bÃ¡sicos',minerals_precious:'Minerales preciosos'};
-  const defaults={wallet:4060000,inventory:Object.fromEntries(Object.keys(categories).map(k=>[k,0])),inventoryDetails:{},ships:[],characters:[],custom:{},history:[],notes:[],currentSystem:null,undo:null};
-  const cloudClient=window.nexoSupabaseClient||null,siteUrl='https://lsfcb16-netizen.github.io/nexo-traveller/';
-  let store=loadStore(),activeId=store.activeId,data=structuredClone(defaults),activeShipId=null,activeInventoryKey=null,pendingInventorySale=null,hangarScreen='list',pendingHangarSale=null,mode='buy',creditMode='add',pendingCredit=null,historyExpanded=false,editAction=null,activeNoteId=null,cloudUser=null,authMode='signin',cloudReady=false,passwordRecoveryPending=false,cloudSaveChain=Promise.resolve(),mapLocationPending='' ;
-  const $=id=>document.getElementById(id), fmt=n=>new Intl.NumberFormat('es-ES',{maximumFractionDigits:2}).format(n), whole=n=>new Intl.NumberFormat('es-ES',{maximumFractionDigits:0}).format(n), clean=v=>Number.isFinite(v)?v:0;
-  function normalizeState(raw){const d=raw||{};const inventory={...defaults.inventory,...d.inventory};if(d.inventory?.basic!==undefined){inventory.vehicles_basic=d.inventory.basic;delete inventory.basic}if(d.inventory?.advanced!==undefined){inventory.vehicles_advanced=d.inventory.advanced;delete inventory.advanced}const history=Array.isArray(d.history)?d.history.map(tx=>({...tx,product:tx.product==='basic'?'vehicles_basic':tx.product==='advanced'?'vehicles_advanced':tx.product})):[];let notes=Array.isArray(d.notes)?d.notes.filter(n=>n&&typeof n==='object').map(n=>({id:n.id||crypto.randomUUID(),title:String(n.title||'Nota de la partida'),body:String(n.body||''),updatedAt:n.updatedAt||new Date().toISOString()})):[];if(typeof d.notes==='string'&&d.notes.trim())notes=[{id:'legacy-note',title:'Nota de la partida',body:d.notes,updatedAt:new Date().toISOString()}];const characters=Array.isArray(d.characters)?d.characters.filter(c=>c&&typeof c==='object').map(c=>({...c,id:c.id||crypto.randomUUID(),personal:c.personal||{},biometrics:c.biometrics||{},vitals:c.vitals||{},skills:Array.isArray(c.skills)?c.skills:[],weeks:Math.max(0,Number(c.weeks)||0)})):[];const inventoryDetails={};for(const [key,details] of Object.entries(d.inventoryDetails||{})){inventoryDetails[key]={packSize:Math.max(1,Math.trunc(Number(details?.packSize)||1)),unitValue:Math.max(0,Number(details?.unitValue)||0)}}return {...structuredClone(defaults),...d,inventory,inventoryDetails,ships:Array.isArray(d.ships)?d.ships.filter(s=>s&&typeof s==='object').map(s=>({id:s.id||crypto.randomUUID(),name:String(s.name||'Nave'),tonnage:Math.max(0,Number(s.tonnage)||0),value:Math.max(0,Number(s.value)||0)})):[],characters,custom:d.custom||{},history,notes,undo:null}}
-  function loadStore(){try{const saved=localStorage.getItem(KEY);if(saved===null)return {activeId:null,campaigns:[]};const parsed=JSON.parse(saved);if(parsed?.campaigns){parsed.campaigns.forEach(c=>{c.name=(c.name||'Partida').replace(/\s*[Â·:â€“-]\s*NEXO\s*$/i,'').trim()||'Partida'});return parsed}const initial=normalizeState(parsed);return {activeId:'campaign-1',campaigns:[{id:'campaign-1',name:'Partida 1',createdAt:new Date().toISOString(),data:initial}]}}catch{return {activeId:null,campaigns:[]}}}
-  function saveLocalStore(){localStorage.setItem(KEY,JSON.stringify(store))}
-  function setAccountIdentity(user=null){const button=$('accountButton');if(!button)return;const email=user?.email||'';button.textContent=email?email.split('@')[0].slice(0,2).toLocaleUpperCase('es'):'N';button.title=email?`Cuenta: ${email}`:'Cuenta NEXO'}
-  function setConnection(message,state=''){const el=$('connectionStatus');el.className=`connection ${state}`;el.innerHTML=`<i></i> ${message}`;$('syncHint').textContent=cloudUser?'SINCRONIZACIÃ“N PERSONAL ENTRE TUS DISPOSITIVOS':'EXPORTA UNA COPIA PARA PASAR DATOS A OTRO DISPOSITIVO';$('backupDescription').textContent=cloudUser?'La partida se guarda en tu cuenta y se sincroniza entre tus dispositivos. Usa una copia JSON como respaldo adicional.':'Los datos se guardan en este dispositivo. Para pasarlos a otro, exporta una copia e impÃ³rtala allÃ­.';document.querySelectorAll('.pda-footer span:last-child').forEach(node=>node.textContent=cloudUser?'SINCRONIZADO EN TU CUENTA':'DATOS GUARDADOS EN ESTE DISPOSITIVO')}
-  function queueCloudSave(campaign){if(!cloudClient||!cloudUser||!campaign)return;const row={id:campaign.id,owner_id:cloudUser.id,name:campaign.name,data:campaign.data};setConnection('SINCRONIZANDO','syncing');cloudSaveChain=cloudSaveChain.then(async()=>{const {error}=await cloudClient.from('campaigns').upsert(row,{onConflict:'id'});if(error)throw error;setConnection('DATOS EN LA NUBE')}).catch(error=>{console.error('NEXO sync error',error);setConnection('ERROR DE SINCRONIZACIÃ“N Â· COPIA LOCAL CONSERVADA','sync-error')})}
-  function persist(){const campaign=store.campaigns.find(c=>c.id===activeId);if(campaign)campaign.data=data;store.activeId=activeId;saveLocalStore();render();queueCloudSave(campaign)}
-  function setAuthMessage(message,error=false){$('authMessage').textContent=message;$('authMessage').classList.toggle('error',error)}
-  function friendlyAuthError(error){const message=String(error?.message||'').toLowerCase();if(message.includes('rate limit')||message.includes('too many requests'))return 'Se ha alcanzado el lÃ­mite temporal de correos de prueba. Espera aproximadamente una hora antes de volver a solicitar otro enlace.';if(message.includes('email address not authorized')||message.includes('email_address_not_authorized'))return 'El correo de prueba de Supabase solo puede enviarse a miembros del equipo. Para enviar correos a cualquier persona hay que configurar un proveedor de correo.';if(message.includes('invalid login credentials'))return 'El correo o la contraseÃ±a no coinciden. Si acabas de crear la cuenta, primero debes verificar el correo.';return error?.message||'No se pudo completar el acceso. IntÃ©ntalo de nuevo.'}
-  function showAuthGate(){cloudUser=null;cloudReady=false;setAccountIdentity();$('gameSelector').hidden=true;$('gameApp').hidden=true;$('authGate').hidden=false;$('authEmail').focus();setAuthMode('signin');setConnection('INICIA SESIÃ“N')}
-  function setAuthMode(mode){authMode=mode;const signingUp=mode==='signup',recovery=mode==='recovery',newPassword=mode==='new-password';$('authTitle').textContent=signingUp?'Crear cuenta personal':recovery?'Recuperar contraseÃ±a':newPassword?'Crear contraseÃ±a nueva':'Accede a tu cuenta';$('authIntro').textContent=signingUp?'Crea tu cuenta para sincronizar tus partidas entre dispositivos.':recovery?'Te enviaremos un enlace para elegir una contraseÃ±a nueva.':newPassword?'Elige una contraseÃ±a nueva para tu cuenta.':'Entra con tu correo y contraseÃ±a.';$('authSubmit').textContent=signingUp?'CREAR CUENTA':recovery?'ENVIAR ENLACE DE RECUPERACIÃ“N':newPassword?'GUARDAR CONTRASEÃ‘A':'INICIAR SESIÃ“N';$('authPasswordLabel').textContent=signingUp?'CREA UNA CONTRASEÃ‘A':newPassword?'NUEVA CONTRASEÃ‘A':'CONTRASEÃ‘A';$('authPassword').autocomplete=signingUp||newPassword?'new-password':'current-password';$('authPassword').placeholder=signingUp||newPassword?'MÃ­nimo 8 caracteres':'Tu contraseÃ±a';$('authPassword').required=!recovery;$('authPasswordField').hidden=recovery;$('authEmailField').hidden=newPassword;$('authEmail').required=!newPassword;$('authModeButton').hidden=recovery||newPassword;$('authBackButton').hidden=!(recovery||newPassword);$('forgotPasswordButton').hidden=signingUp||recovery||newPassword;$('localModeButton').hidden=newPassword;$('authModeButton').textContent=signingUp?'Â¿Ya tienes cuenta? Inicia sesiÃ³n':'Â¿No tienes cuenta? RegÃ­strate';setAuthMessage('')}
-  async function activateCloudSession(user){if(!user||!cloudClient||cloudUser?.id===user.id)return;cloudUser=user;setAccountIdentity(user);setConnection('CARGANDO CUENTA','syncing');let {data:remoteRows,error}=await cloudClient.from('campaigns').select('*').order('created_at',{ascending:true});if(passwordRecoveryPending)return;if(error){cloudUser=null;showAuthGate();setAuthMessage('No se pudieron cargar tus partidas. Comprueba la conexiÃ³n e intÃ©ntalo de nuevo.',true);return}
-    if(!remoteRows.length){const local=loadStore(),idMap=new Map(),rows=local.campaigns.map(c=>{const id=crypto.randomUUID();idMap.set(c.id,id);return{id,owner_id:user.id,name:c.name,data:normalizeState(c.data),created_at:c.createdAt||new Date().toISOString()}});if(rows.length){const result=await cloudClient.from('campaigns').insert(rows).select('*');if(result.error){cloudUser=null;showAuthGate();setAuthMessage('No se pudo sincronizar la copia de este dispositivo. Tus datos locales siguen intactos.',true);return}remoteRows=result.data;localStorage.setItem(KEY,JSON.stringify({activeId:idMap.get(local.activeId)||remoteRows[0]?.id,campaigns:remoteRows.map(r=>({id:r.id,name:r.name,createdAt:r.created_at,data:normalizeState(r.data)}))}))}}
-    store={activeId:null,campaigns:remoteRows.map(r=>({id:r.id,name:r.name,createdAt:r.created_at,data:normalizeState(r.data)}))};const cached=(()=>{try{return JSON.parse(localStorage.getItem(KEY)||'{}')}catch{return{}}})();store.activeId=store.campaigns.some(c=>c.id===cached.activeId)?cached.activeId:store.campaigns[0]?.id||null;activeId=store.activeId;saveLocalStore();cloudReady=true;setConnection('DATOS EN LA NUBE');$('authGate').hidden=true;$('gameApp').hidden=true;$('gameSelector').hidden=false;renderCampaigns()}
-  async function initializeCloud(){cloudUser=null;cloudReady=false;setAccountIdentity();$('accountButton').hidden=true;setConnection('DATOS LOCALES');showGames()}
-  async function refreshCloudCampaigns(){if(!cloudUser||!cloudReady||document.visibilityState==='hidden')return;await cloudSaveChain;const {data:rows,error}=await cloudClient.from('campaigns').select('*').order('created_at',{ascending:true});if(error){setConnection('SIN CONEXIÃ“N Â· COPIA LOCAL CONSERVADA','sync-error');return}const previous=activeId;store={activeId:previous,campaigns:rows.map(r=>({id:r.id,name:r.name,createdAt:r.created_at,data:normalizeState(r.data)}))};if(!store.campaigns.some(c=>c.id===previous))store.activeId=store.campaigns[0]?.id||null;activeId=store.activeId;const current=store.campaigns.find(c=>c.id===activeId);if(current)data=normalizeState(current.data);saveLocalStore();setConnection('DATOS EN LA NUBE');if(!$('gameSelector').hidden)renderCampaigns();else if(!$('gameApp').hidden)render()}
-  const introTemplate=$('introScreen').cloneNode(true);
-  function transitionTo(message,callback,duration=1200){const screen=introTemplate.cloneNode(true),label=screen.querySelector('#introMessage'),mark=screen.querySelector('#introMark'),bar=screen.querySelector('.intro-progress span');screen.removeAttribute('id');screen.classList.add('transition-overlay');label.removeAttribute('id');mark.removeAttribute('id');label.textContent=message;screen.style.animationDuration=`${duration}ms`;bar.style.animationDuration=`${duration-150}ms`;document.body.append(screen);callback?.();setTimeout(()=>screen.remove(),duration+80)}
-  function playIntro(){const screen=$('introScreen');if(screen)setTimeout(()=>screen.remove(),2000)}
-  function showGames(){if(!$('appWorkspace').hidden&&$('appWorkspace').dataset.view==='notes'&&!$('noteEditor').hidden&&!saveNote())return;$('gameApp').hidden=true;$('gameSelector').hidden=false;renderCampaigns() }
-  function openGame(id){const campaign=store.campaigns.find(c=>c.id===id);if(!campaign)return;activeId=id;data=normalizeState(campaign.data);store.activeId=id;saveLocalStore();queueCloudSave(campaign);$('gameSelector').hidden=true;$('gameApp').hidden=false;render();openAppHome()}
-  function renderCampaigns(){const list=$('campaignList');list.replaceChildren();store.campaigns.forEach(c=>{const card=document.createElement('article');card.className='campaign-card';const itemCount=Object.values(c.data.inventory||{}).reduce((a,n)=>a+(Number(n)||0),0);card.innerHTML=`<div class="campaign-mark">N</div><div class="campaign-info"><small>CAMPAÃ‘A TRAVELLER</small><h2></h2><span></span></div><div class="campaign-stats"><b>${fmt(c.data.wallet||0)} Cr</b><small>${itemCount} Ã­tems Â· ${(c.data.history||[]).length} operaciones</small></div><button class="campaign-rename" type="button" title="Renombrar partida" aria-label="Renombrar partida">âœ</button><button class="campaign-open">ENTRAR â†’</button>`;card.querySelector('h2').textContent=c.name;card.querySelector('.campaign-info span').textContent=c.id===activeId?'PARTIDA ACTIVA':cloudUser?'SINCRONIZADA EN TU CUENTA':'GUARDADA EN ESTE DISPOSITIVO';card.querySelector('.campaign-open').onclick=()=>transitionTo('CARGANDO PARTIDA',()=>openGame(c.id),1200);card.querySelector('.campaign-rename').onclick=()=>startRename(c.id);list.append(card)})}
-  function startRename(id){const campaign=store.campaigns.find(c=>c.id===id);if(!campaign)return;$('renameCampaignName').value=campaign.name; $('renameCampaignDialog').dataset.campaignId=id;$('renameCampaignDialog').showModal();$('renameCampaignName').focus()}
-  function rowRate(roll){if(roll<=-1)return[-Infinity,400,25];if(roll>=21)return[21,25,400];return bands.find(([result])=>result===roll)||[-Infinity,400,25]}
-  function calc(){const read=id=>{const raw=$(id).value.trim();if(!raw)return null;const value=Number(raw);return Number.isFinite(value)?value:null},rollValue=read('roll'),roll=rollValue===null?null:Math.trunc(rollValue),price=read('price'),packsValue=read('packs'),packs=packsValue===null?null:Math.trunc(packsValue),packSizeValue=read('packSize'),packSize=packSizeValue===null?null:Math.trunc(packSizeValue),product=$('product').value,qty=packs===null||packSize===null?null:packs*packSize,band=roll===null?null:rowRate(roll),rate=band?band[mode==='buy'?1:2]:null,base=rate,unit=price===null||rate===null?null:price*rate/100,total=unit===null||qty===null||!product?null:unit*qty;return{roll,price,packs,packSize,qty,base,rate,unit,total,product}}
-  function resetTradeForm(){['roll','price','packs','packSize'].forEach(id=>$(id).value='');$('product').value='';calculateView()}
-  function productName(key){return categories[key]||data.custom[key]||'Ãtem personalizado'}
-  function render(){if(!data)return;const campaign=store.campaigns.find(c=>c.id===activeId);$('activeCampaignTitle').textContent=campaign?.name||'Centro de comercio';$('pdaCampaignName').textContent=(campaign?.name||'PARTIDA').toLocaleUpperCase('es');$('workspaceCampaign').textContent=campaign?.name||'';$('walletValue').innerHTML=`${whole(data.wallet)} <small>Cr</small>`;const totalItems=Object.values(data.inventory).reduce((a,n)=>a+(Number(n)||0),0);$('itemsValue').innerHTML=`${whole(totalItems)} <small>uds.</small>`;$('operationsValue').innerHTML=`${whole(data.history.length)} <small>regs.</small>`;renderStocks();renderCustom();renderProductOptions();renderHistory();renderNotes();renderInventoryDetail();window.NEXO_HANGAR_UI?.render();window.NEXO_CHARACTERS_UI?.render();$('undoBtn').disabled=!data.undo;calculateView();if($('appWorkspace').dataset.view==='map')renderMapApp() }
-  function openAppHome(){if(!$('appWorkspace').hidden&&$('appWorkspace').dataset.view==='notes'&&!$('noteEditor').hidden&&!saveNote())return;$('appWorkspace').hidden=true;$('appHome').hidden=false}
-  function showApp(app){const names={calculator:'COMERCIO',inventory:'INVENTARIO',wallet:'CARTERA',notes:'NOTAS',activity:'REGISTRO',map:'MAPA',traveller:'TRAVELLER',hangar:'HANGAR',characters:'PERSONAJES'};transitionTo(`CONECTANDO Â· ${names[app]||'MÃ“DULO'}`,()=>openApp(app),1200)}
-  function openApp(app){const names={calculator:'COMERCIO',inventory:'INVENTARIO',wallet:'CARTERA',notes:'NOTAS',activity:'REGISTRO',map:'MAPA',traveller:'TRAVELLER',hangar:'HANGAR',characters:'PERSONAJES'};$('appHome').hidden=true;$('appWorkspace').hidden=false;$('appWorkspace').dataset.view=app;$('workspaceTitle').textContent=names[app]||'APLICACIÃ“N';$('workspaceCampaign').textContent=store.campaigns.find(c=>c.id===activeId)?.name||'';if(app==='inventory')closeInventoryDetail();if(app==='map'){renderMapApp()}if(app==='traveller'){renderTravellerIndex();$('travellerSearch').focus()}if(app==='hangar')window.NEXO_HANGAR_UI?.open();if(app==='characters')window.NEXO_CHARACTERS_UI?.open();if(app==='notes'){activeNoteId=null;$('addNoteButton').hidden=false;$('noteEditor').hidden=true;$('notesList').hidden=false;renderNotes()}}
-  function normalizeSearch(value){return String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('es').trim()}
-  function renderTravellerIndex(){const host=$('travellerResults');if(!host)return;const query=normalizeSearch($('travellerSearch').value),category=$('travellerCategory').value,index=window.NEXO_TRAVELLER_INDEX||[];host.replaceChildren();if(!query){const prompt=document.createElement('div');prompt.className='traveller-empty';prompt.innerHTML='<span>âŒ•</span><b>Busca un tema del manual</b><small>Prueba con Â«comercioÂ», Â«navesÂ», Â«personajesÂ», Â«equipoÂ» o Â«mundosÂ».</small>';host.append(prompt);return}const stopWords=new Set(['de','del','la','el','las','los','y','en','a','para','por','con','un','una']);const terms=query.split(/\s+/).filter(term=>term&&!stopWords.has(term));if(!terms.length){const empty=document.createElement('div');empty.className='traveller-empty';empty.innerHTML='<span>âŒ•</span><b>Escribe una palabra clave</b><small>Por ejemplo: comercio, compra, venta, naves o planetas.</small>';host.append(empty);return}const matches=index.map(item=>{if(category!=='all'&&item.edition!==category)return null;const title=normalizeSearch(item.title),content=normalizeSearch([item.title,item.section,item.keywords,item.summary].join(' '));if(!terms.every(term=>content.includes(term)))return null;const score=terms.reduce((n,term)=>n+(title.includes(term)?4:0)+(normalizeSearch(item.keywords).includes(term)?2:0),0);return{item,score}}).filter(Boolean).sort((a,b)=>b.score-a.score);if(!matches.length){const empty=document.createElement('div');empty.className='traveller-empty';empty.innerHTML='<span>âŒ•</span><b>No hay coincidencias</b><small>Prueba otras palabras o cambia la secciÃ³n seleccionada.</small>';host.append(empty);return}const count=document.createElement('div');count.className='traveller-result-count';count.textContent=`${matches.length} resultado${matches.length===1?'':'s'} Â· pulsa en otra palabra para filtrar`;host.append(count);matches.forEach(({item})=>{const card=document.createElement('article');card.className='traveller-result';const head=document.createElement('div'),title=document.createElement('h3'),page=document.createElement('a'),meta=document.createElement('small'),summary=document.createElement('p');head.className='traveller-result-head';title.textContent=item.title;page.href=`${window.NEXO_TRAVELLER_PDF_URL||'https://drive.google.com/file/d/1PeJ6XO3_EUhbNJybdITivxMVY6LU4uWQ/view'}#page=${(item.pages.match(/\d+/)||['1'])[0]}`;page.target='_blank';page.rel='noopener noreferrer';page.textContent='VER '+item.pages+' â†—';page.className='traveller-page';meta.className='traveller-result-meta';meta.textContent=item.section;summary.textContent=item.summary;card.append(head);head.append(title,page);card.append(meta,summary);host.append(card)})}
-  function apiJsonp(path){return new Promise((resolve,reject)=>{const callback=`_nexoMap${Date.now()}${Math.random().toString(36).slice(2)}`,script=document.createElement('script'),timer=setTimeout(()=>finish(new Error('Tiempo de espera agotado')),12000);function finish(error,value){clearTimeout(timer);delete window[callback];script.remove();error?reject(error):resolve(value)}window[callback]=value=>finish(null,value);script.onerror=()=>finish(new Error('No se pudo conectar con Traveller Map'));script.src=`https://travellermap.com${path}${path.includes('?')?'&':'?'}jsonp=${callback}`;document.head.append(script)})}
-  function mapResults(payload){const raw=payload?.Results?.Items||payload?.Results?.items||payload?.results||payload?.Items||payload?.items||[];return (Array.isArray(raw)?raw:[]).map(item=>{const world=item.World||item.world||item.Subsector||item.subsector||item;const hx=fieldValue(world,'HexX'),hy=fieldValue(world,'HexY'),hex=fieldValue(item,'Hex')||fieldValue(item,'hex')||fieldValue(world,'Hex')||fieldValue(world,'hex')||(hx!==''&&hy!==''?`${String(hx).padStart(2,'0')}${String(hy).padStart(2,'0')}`:'');return {name:item.Name||item.name||world.Name||world.name||item.Text||item.text||'Sistema',sector:item.Sector||item.sector||world.Sector||world.sector||'',hex,world}})}
-  function fieldValue(obj,...keys){for(const key of keys){const found=Object.keys(obj||{}).find(k=>k.toLowerCase()===key.toLowerCase());if(found&&obj[found]!==''&&obj[found]!=null)return obj[found]}return ''}
-  function renderMapDetails(system){const card=$('currentSystemCard');if(!system){card.hidden=true;return}card.hidden=false;const w=system.world||{},uwp=String(fieldValue(w,'UWP')||'');const attrs=[['UWP',uwp],['HexÃ¡gono',system.hex||fieldValue(w,'Hex')],['Sector',system.sector||fieldValue(w,'Sector')],['Bases',fieldValue(w,'Bases')],['Zona',fieldValue(w,'Zone')],['Puerto estelar',uwp[0]],['TamaÃ±o',uwp[1]],['AtmÃ³sfera',uwp[2]],['HidrografÃ­a',uwp[3]],['PoblaciÃ³n',uwp[4]],['Gobierno / ley',uwp.length>=7?`${uwp[5]} / ${uwp[6]}`:null],['Nivel tecnolÃ³gico',uwp.length>=9?uwp[8]:null],['Comercio',fieldValue(w,'Remarks')],['Alianza',fieldValue(w,'Allegiance')],['Estrellas',fieldValue(w,'Stellar')]].filter(([,v])=>String(v||'').trim());card.innerHTML='<div class="system-card-head"><div><small>SISTEMA DE ESTA PARTIDA</small><h3></h3></div><button id="clearCurrentSystem" class="small-action subtle" type="button">QUITAR</button></div><div class="system-attributes"></div>';card.querySelector('h3').textContent=system.name;const grid=card.querySelector('.system-attributes');if(!attrs.length)grid.innerHTML='<p>El sistema estÃ¡ guardado. Traveller Map no ha devuelto datos detallados para esta coincidencia.</p>';else attrs.forEach(([label,value])=>{const el=document.createElement('div');el.className='system-attribute';const small=document.createElement('small'),b=document.createElement('b');small.textContent=label;b.textContent=value;el.append(small,b);grid.append(el)});$('clearCurrentSystem').onclick=()=>{data.currentSystem=null;persist()}}
-  function renderMapApp(){if(!$('systemSearchForm'))return;const system=data.currentSystem,frame=$('travellerMapFrame');$('systemSearch').value=system?.name||'';renderMapDetails(system);let url='https://travellermap.com/?style=terminal';if(system?.sector&&system?.hex&&Number.isFinite(Number(system.mapX))&&Number.isFinite(Number(system.mapY))){const x=Number(system.mapX),y=Number(system.mapY),params=new URLSearchParams({x:String(x),y:String(y),scale:'128',style:'terminal',yah_x:String(x),yah_y:String(y)});url=`https://travellermap.com/?${params}`}else if(system?.sector&&system?.hex){const params=new URLSearchParams({sector:system.sector,hex:system.hex,style:'terminal',yah:'1'});url=`https://travellermap.com/?${params}`;ensureMapPoint(system)}else if(system?.name){const params=new URLSearchParams({qn:system.name,style:'terminal'});url=`https://travellermap.com/?${params}`}if(frame.getAttribute('src')!==url)frame.src=url;$('openFullMap').href=url}
-  function ensureMapPoint(system){const key=`${system.sector}|${system.hex}`;if(mapLocationPending===key||!system.sector||!system.hex)return;mapLocationPending=key;apiJsonp(`/api/coordinates?sector=${encodeURIComponent(system.sector)}&hex=${encodeURIComponent(system.hex)}`).then(coords=>{const wxRaw=fieldValue(coords,'X'),wyRaw=fieldValue(coords,'Y'),wx=Number(wxRaw),wy=Number(wyRaw);if(wxRaw===''||wyRaw===''||!Number.isFinite(wx)||!Number.isFinite(wy))return;const mapX=(wx-.5)*Math.cos(Math.PI/6),mapY=-(wy-(Math.abs(wx)%2===0?.5:0)),current=data.currentSystem;if(!current||current.sector!==system.sector||current.hex!==system.hex)return;current.mapX=Number(mapX.toFixed(4));current.mapY=Number(mapY.toFixed(4));persist()}).catch(()=>{}).finally(()=>{if(mapLocationPending===key)mapLocationPending=''})}
-  async function searchSystem(query){const status=$('systemSearchStatus'),host=$('systemSearchResults');host.replaceChildren();status.textContent='BUSCANDO EN TRAVELLER MAPâ€¦';try{const payload=await apiJsonp(`/api/search?q=${encodeURIComponent(query)}`),results=mapResults(payload).filter(r=>r.name);if(!results.length){status.textContent='No se encontraron sistemas. Prueba con otro nombre.';return}status.textContent=`${results.length} coincidencia${results.length===1?'':'s'} Â· selecciona el sistema correcto`;results.slice(0,8).forEach(result=>{const button=document.createElement('button');button.type='button';button.className='system-result';const title=document.createElement('b'),meta=document.createElement('small');title.textContent=result.name;meta.textContent=[result.sector,result.hex].filter(Boolean).join(' Â· ')||'Coincidencia de Traveller Map';button.append(title,meta);button.onclick=()=>selectSystem(result);host.append(button)})}catch{status.textContent='No se pudo consultar el buscador. Comprueba la conexiÃ³n y vuelve a intentarlo; el mapa completo sigue disponible.'}}
-  async function selectSystem(result){$('systemSearchStatus').textContent='CARGANDO DATOS DEL SISTEMAâ€¦';let world=result.world||{};if(result.sector&&result.hex){try{const payload=await apiJsonp(`/api/jumpworlds?sector=${encodeURIComponent(result.sector)}&hex=${encodeURIComponent(result.hex)}&jump=0`),worlds=payload?.Worlds||payload?.worlds||payload?.Results?.Items||payload?.results||[];if(Array.isArray(worlds)&&worlds.length)world=worlds.find(w=>String(fieldValue(w,'Hex'))===String(result.hex))||worlds[0]}catch{}}const sector=result.sector||fieldValue(world,'Sector'),hex=result.hex||fieldValue(world,'Hex');data.currentSystem={name:result.name,sector,hex,world};persist();$('systemSearchResults').replaceChildren();$('systemSearchStatus').textContent='SISTEMA GUARDADO Â· MAPA CENTRADO EN EL MUNDO';renderMapApp()}    function renderNotes(){const host=$('notesList');host.replaceChildren();const notes=[...(data.notes||[])].sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));if(!notes.length){host.innerHTML='<div class="empty-notes">TodavÃ­a no hay notas guardadas. Pulsa Â«AÃ±adir notaÂ» para crear la primera.</div>';return}notes.forEach(note=>{const card=document.createElement('button');card.type='button';card.className='note-card';card.innerHTML='<span class="note-card-glyph">âœ</span><span class="note-card-title"></span><span class="note-card-arrow">â†’</span>';card.querySelector('.note-card-title').textContent=note.title;card.onclick=()=>openNote(note.id);host.append(card)})}
-  function openNote(id=null){activeNoteId=id;const note=(data.notes||[]).find(n=>n.id===id);$('noteTitle').value=note?.title||'';$('noteBody').value=note?.body||'';$('notesList').hidden=true;$('noteEditor').hidden=false;$('addNoteButton').hidden=true;$('deleteNoteButton').hidden=!note;$('noteSaveStatus').textContent='NOTA GUARDADA EN ESTA PARTIDA';$('noteTitle').focus()}
-  function saveNote(closeAfter=true){const title=$('noteTitle').value.trim(),body=$('noteBody').value;if(!title){if(!activeNoteId&&!body.trim()){if(closeAfter){$('noteEditor').hidden=true;$('notesList').hidden=false;$('addNoteButton').hidden=false;activeNoteId=null}return true}alert('Pon un tÃ­tulo a la nota antes de guardarla.');$('noteTitle').focus();return false}const notes=data.notes||(data.notes=[]),existing=notes.find(n=>n.id===activeNoteId),now=new Date().toISOString();if(existing){existing.title=title;existing.body=body;existing.updatedAt=now}else{const note={id:crypto.randomUUID(),title,body,updatedAt:now};notes.unshift(note);activeNoteId=note.id}const campaign=store.campaigns.find(c=>c.id===activeId);if(campaign)campaign.data=data;saveLocalStore();queueCloudSave(campaign);$('noteSaveStatus').textContent='GUARDADA EN ESTA PARTIDA';if(closeAfter){$('noteEditor').hidden=true;$('notesList').hidden=false;$('addNoteButton').hidden=false;renderNotes();activeNoteId=null}return true}
-  function deleteNote(){const note=(data.notes||[]).find(n=>n.id===activeNoteId);if(!note)return;if(!confirm(`Â¿Eliminar la nota Â«${note.title}Â»? Esta acciÃ³n no se puede deshacer.`))return;data.notes=data.notes.filter(n=>n.id!==activeNoteId);const campaign=store.campaigns.find(c=>c.id===activeId);if(campaign)campaign.data=data;saveLocalStore();queueCloudSave(campaign);activeNoteId=null;$('noteEditor').hidden=true;$('notesList').hidden=false;$('addNoteButton').hidden=false;renderNotes()}
-  function renderStocks(){const host=$('stockList');host.replaceChildren();Object.entries(categories).forEach(([key,name],index)=>host.append(makeStockRow(key,name,index)))}
-  function renderProductOptions(){const select=$('product'),selected=select.value;for(const option of [...select.options])if(option.dataset.custom)option.remove();Object.entries(data.custom).forEach(([key,name])=>{const option=document.createElement('option');option.value=key;option.textContent=name;option.dataset.custom='true';select.append(option)});if([...select.options].some(o=>o.value===selected))select.value=selected}
-  function makeStockRow(key,name,index=0){const row=document.createElement('button');row.type='button';row.className='stock-row stock-row-open';row.setAttribute('aria-label',`Abrir ${name}`);const packSize=data.inventoryDetails[key]?.packSize||1;row.innerHTML=`<span class="stock-icon ${index%2?'advanced-icon':'basic-icon'}">${index<2?'âŒ˜':index<4?'â—‡':'â—ˆ'}</span><span class="stock-name"><b></b><small></small></span><b class="stock-count">${whole(data.inventory[key]||0)}</b><span class="stock-unit">uds.</span><span class="stock-menu" aria-hidden="true">â€º</span>`;row.querySelector('.stock-name b').textContent=name;row.querySelector('.stock-name small').textContent=`${categories[key]?'INVENTARIO':'ARTÃCULO PERSONALIZADO'} Â· ${whole(packSize)} UD./PACK`;row.onclick=()=>openInventoryItem(key,name);return row}
-  function renderCustom(){const host=$('customStocks');host.replaceChildren();Object.entries(data.custom).forEach(([key,name])=>host.append(makeStockRow(key,name,1)))}
-  function openInventoryItem(key,name){activeInventoryKey=key;$('inventoryListView').hidden=true;$('inventoryDetailView').hidden=false;$('inventoryItemName').textContent=name;$('inventoryUnits').value=data.inventory[key]||0;$('inventoryPackSize').value=data.inventoryDetails[key]?.packSize||1;$('inventoryUnitValue').value=data.inventoryDetails[key]?.unitValue||'';$('inventorySalePacks').value='1';$('inventorySaleMode').value='ordinary';$('inventorySaleRoll').value='';$('inventorySaleRollField').hidden=true;calculateInventorySale()}
-  function renderInventoryDetail(){if(!activeInventoryKey||$('inventoryDetailView').hidden)return;const key=activeInventoryKey;$('inventoryItemName').textContent=productName(key);const units=Math.max(0,Math.trunc(Number($('inventoryUnits').value)||0)),size=Math.max(1,Math.trunc(Number($('inventoryPackSize').value)||1));$('inventoryUnitsAvailable').textContent=`DISPONIBLES: ${whole(units)} UDS. Â· ${whole(Math.floor(units/size))} PACKS COMPLETOS${units%size?` + ${whole(units%size)} SUELTAS`:''}`;const unitValue=Math.max(0,Number($('inventoryUnitValue').value)||0),packs=Math.max(0,Number($('inventorySalePacks').value)||0),roll=Number($('inventorySaleRoll').value),commercial=$('inventorySaleMode').value==='commercial',rate=commercial&&$('inventorySaleRoll').value.trim()?rowRate(roll)[2]:100,qty=packs*size;$('inventorySaleUnits').textContent=whole(qty);$('inventorySaleRate').textContent=`${fmt(rate)}%`;$('inventorySaleTotal').textContent=`${fmt(unitValue*qty*rate/100)} Cr`;$('inventorySaleAction').disabled=!unitValue||!packs||qty>units||(commercial&&!$('inventorySaleRoll').value.trim())}
-  function calculateInventorySale(){renderInventoryDetail()}
-  function saveInventoryDetails(){if(!activeInventoryKey)return;const units=Math.max(0,Math.trunc(Number($('inventoryUnits').value)||0)),packSize=Math.max(1,Math.trunc(Number($('inventoryPackSize').value)||1)),unitValue=Math.max(0,Number($('inventoryUnitValue').value)||0);data.inventory[activeInventoryKey]=units;data.inventoryDetails[activeInventoryKey]={packSize,unitValue};persist()}
-  function askInventorySale(){if(!activeInventoryKey)return;const key=activeInventoryKey,units=Math.max(0,Math.trunc(Number($('inventoryUnits').value)||0)),packSize=Math.max(1,Math.trunc(Number($('inventoryPackSize').value)||1)),packs=Math.trunc(Number($('inventorySalePacks').value)),qty=packs*packSize,unitValue=Math.max(0,Number($('inventoryUnitValue').value)||0),commercial=$('inventorySaleMode').value==='commercial',roll=commercial?Math.trunc(Number($('inventorySaleRoll').value)):null;if(!Number.isInteger(packs)||packs<1){alert('Indica cuÃ¡ntos packs quieres vender.');return}if(!unitValue){alert('Indica el valor base por unidad del Ã­tem.');return}if(qty>units){alert(`Inventario insuficiente: tienes ${units} unidades.`);return}if(commercial&&!$('inventorySaleRoll').value.trim()){alert('Introduce la tirada comercial.');return}const rate=commercial?rowRate(roll)[2]:100,total=unitValue*qty*rate/100;pendingInventorySale={key,qty,units,packSize,unitValue,roll,rate,total,commercial};$('dialogTitle').textContent='Confirmar venta de inventario';$('dialogSummary').textContent=`Vender ${whole(packs)} pack${packs===1?'':'s'} de ${productName(key)} (${whole(qty)} unidades) por ${fmt(total)} Cr Â· ${commercial?`venta comercial, tirada ${roll}, ${fmt(rate)}%`:'venta ordinaria, 100% del valor base'}. La cartera aumentarÃ¡ y el inventario disminuirÃ¡.`;$('dialogCancel').textContent='NO, CANCELAR';$('dialogConfirm').textContent='SÃ, CONFIRMAR VENTA';$('dialogConfirm').className='confirm-button sell-confirm';$('confirmDialog').showModal()}
-  function saveInventorySale(){if(!pendingInventorySale)return;const sale=pendingInventorySale;pendingInventorySale=null;if((Number(data.inventory[sale.key])||0)<sale.qty){alert('El inventario ha cambiado y ya no hay unidades suficientes.');return}const balanceBefore=data.wallet;data.undo={wallet:data.wallet,inventory:structuredClone(data.inventory),inventoryDetails:structuredClone(data.inventoryDetails),ships:structuredClone(data.ships||[]),history:structuredClone(data.history)};data.wallet+=sale.total;data.inventory[sale.key]=sale.units-sale.qty;data.inventoryDetails[sale.key]={packSize:sale.packSize,unitValue:sale.unitValue};$('inventoryUnits').value=data.inventory[sale.key];data.history.unshift({id:crypto.randomUUID(),date:new Date().toISOString(),mode:'sell',product:sale.key,qty:sale.qty,total:sale.total,roll:sale.roll,rate:sale.rate,unit:sale.unitValue*sale.rate/100,balanceBefore,note:`${sale.commercial?'Venta comercial':'Venta ordinaria'} desde inventario Â· ${productName(sale.key)}`});persist();pulseGreen();$('confirmDialog').close();$('inventorySalePacks').value='1';renderInventoryDetail()}
-  function closeInventoryDetail(){activeInventoryKey=null;$('inventoryDetailView').hidden=true;$('inventoryListView').hidden=false}
-  function calculateView(){const c=calc();$('rateLabel').textContent=c.rate===null?'â€”':`${fmt(c.rate)}%`;$('rateLabel').classList.toggle('active-sell-label',mode==='sell');$('totalValue').innerHTML=c.total===null?'â€”':`${fmt(c.total)} <i>Cr</i>`;$('quantityLabel').textContent=c.qty===null?'â€”':`${whole(c.qty)} ${c.qty===1?'unidad':'unidades'}`;$('unitResult').textContent=c.unit===null?'â€”':`${fmt(c.unit)} Cr / ud.`;$('calcNote').textContent=c.roll===null?'Introduce la tirada total':`Tirada ${c.roll} Â· tarifa de tabla ${fmt(c.base)}%`; $('confirmText').textContent=mode==='buy'?'CONFIRMAR COMPRA':'CONFIRMAR VENTA';$('confirmArrow').textContent=mode==='buy'?'â†™':'â†—';$('confirmBtn').classList.toggle('sell-confirm',mode==='sell');$('confirmBtn').classList.toggle('buy-confirm',mode==='buy');$('buyMode').className='mode'+(mode==='buy'?' active-buy':'');$('sellMode').className='mode'+(mode==='sell'?' active-sell':'')}
-  function renderHistory(){
-    const host=$('historyList');host.replaceChildren();const items=historyExpanded?data.history:data.history.slice(0,3);
-    if(!items.length){host.innerHTML='<div class="empty-history">Sin operaciones registradas.</div>'}
-    else items.forEach(tx=>{
-      const node=document.createElement('article'),isCredit=tx.type==='credit',modeClass=isCredit?(tx.direction==='add'?'credit-add':'credit-remove'):tx.mode;
-      node.className='history-item';node.innerHTML=`<div class="history-entry-head"><div class="history-symbol ${modeClass}">${isCredit?(tx.direction==='add'?'ï¼‹':'âˆ’'):tx.mode==='buy'?'â†™':'â†—'}</div><div class="history-desc"><b></b><small></small></div><div class="history-amount ${isCredit?(tx.direction==='add'?'plus':'minus'):tx.mode==='buy'?'minus':'plus'}"></div></div><div class="history-entry-meta"><span class="history-concept"><small>CONCEPTO</small><b></b></span><span class="history-balance"><small>SALDO ANTERIOR</small><b></b></span></div>`;
-      node.querySelector('.history-desc b').textContent=isCredit?(tx.direction==='add'?'Cr aÃ±adidos':'Cr quitados'):`${tx.mode==='buy'?'Compra':'Venta'} Â· ${productName(tx.product)}`;
-      node.querySelector('.history-desc small').textContent=new Date(tx.date).toLocaleString('es-ES',{dateStyle:'short',timeStyle:'short'});
-      node.querySelector('.history-amount').innerHTML=`${isCredit?(tx.direction==='add'?'+':'âˆ’'):tx.mode==='buy'?'âˆ’':'+'}${fmt(isCredit?tx.amount:tx.total)} Cr<small>${isCredit?'Movimiento de cartera':tx.roll===null?`${tx.note?.includes('ordinaria')?'Venta ordinaria Â· ':''}${fmt(tx.rate)}%`:`Tirada ${tx.roll} Â· ${fmt(tx.rate)}%`}</small>`;
-      node.querySelector('.history-concept b').textContent=tx.note?.trim()||'Sin concepto';
-      node.querySelector('.history-balance b').textContent=Number.isFinite(tx.balanceBefore)?`${fmt(tx.balanceBefore)} Cr`:'No registrado';
-      node.querySelector('.history-balance').classList.toggle('balance-unavailable',!Number.isFinite(tx.balanceBefore));host.append(node)
-    });
-    $('historyAll').hidden=data.history.length<=3;$('historyAll').innerHTML=historyExpanded?'MOSTRAR RECIENTES <span>â†‘</span>':'VER HISTORIAL COMPLETO <span>â†’</span>'
-  }
-  function pulseGreen(ids=['walletValue','itemsValue','historyList']){ids.forEach(id=>{const el=$(id);if(!el)return;el.classList.remove('terminal-pulse');void el.offsetWidth;el.classList.add('terminal-pulse');setTimeout(()=>el.classList.remove('terminal-pulse'),850)})}
-  function saveTransaction(){const c=calc(),available=data.inventory[c.product]||0;if(mode==='buy'&&c.total>data.wallet){alert('La cartera no tiene crÃ©ditos suficientes para esta compra.');return}if(mode==='sell'&&c.qty>available){alert(`Inventario insuficiente: hay ${available} uds. de ${productName(c.product)}.`);return}const balanceBefore=data.wallet;data.undo={wallet:data.wallet,inventory:structuredClone(data.inventory),ships:structuredClone(data.ships||[]),history:structuredClone(data.history)};data.wallet+=mode==='buy'?-c.total:c.total;data.inventory[c.product]=(data.inventory[c.product]||0)+(mode==='buy'?c.qty:-c.qty);data.history.unshift({id:crypto.randomUUID(),date:new Date().toISOString(),mode,product:c.product,qty:c.qty,total:c.total,roll:c.roll,rate:c.rate,unit:c.unit,balanceBefore,note:`${mode==='buy'?'Compra':'Venta'} de ${productName(c.product)}`});persist();pulseGreen();$('confirmDialog').close();resetTradeForm()}
-  function saveCredit(){if(!pendingCredit)return;const {direction,amount,note}=pendingCredit;if(direction==='remove'&&amount>data.wallet){alert('No se pueden quitar mÃ¡s crÃ©ditos de los disponibles en la cartera.');return}const balanceBefore=data.wallet;data.undo={wallet:data.wallet,inventory:structuredClone(data.inventory),ships:structuredClone(data.ships||[]),history:structuredClone(data.history)};data.wallet+=direction==='add'?amount:-amount;data.history.unshift({id:crypto.randomUUID(),date:new Date().toISOString(),type:'credit',direction,amount,note,balanceBefore});pendingCredit=null;persist();pulseGreen(['walletValue','historyList']);$('confirmDialog').close()}
-  function askCreditConfirm(){const amount=Number($('creditAmount').value),note=$('creditNote').value.trim();if(!Number.isFinite(amount)||amount<=0){alert('Introduce un importe de crÃ©ditos vÃ¡lido.');return}if(creditMode==='remove'&&amount>data.wallet){alert('No se pueden quitar mÃ¡s crÃ©ditos de los disponibles en la cartera.');return}pendingCredit={direction:creditMode,amount,note};$('dialogTitle').textContent=creditMode==='add'?'Confirmar crÃ©ditos aÃ±adidos':'Confirmar crÃ©ditos quitados';$('dialogSummary').textContent=`${creditMode==='add'?'AÃ±adir':'Quitar'} ${fmt(amount)} Cr${note?` Â· ${note}`:''}. Este ajuste cambiarÃ¡ solo la cartera y quedarÃ¡ registrado en la actividad.`;$('dialogConfirm').textContent=creditMode==='add'?'AÃ‘ADIR CRÃ‰DITOS':'QUITAR CRÃ‰DITOS';$('dialogConfirm').className=`confirm-button ${creditMode==='add'?'buy-confirm':'sell-confirm'}`;$('confirmDialog').showModal()}
-  function askConfirm(){pendingCredit=null;const c=calc();if(c.roll===null){alert('Introduce la tirada total.');$('roll').focus();return}if(c.price===null||c.price<0){alert('Introduce un precio base vÃ¡lido.');$('price').focus();return}if(c.packs===null||c.packs<1){alert('Introduce un nÃºmero de packs vÃ¡lido.');$('packs').focus();return}if(c.packSize===null||c.packSize<1){alert('Introduce las unidades por pack.');$('packSize').focus();return}if(!c.product){alert('Selecciona el tipo de mercancÃ­a.');$('product').focus();return}if(mode==='buy'&&c.total>data.wallet){alert('La cartera no tiene crÃ©ditos suficientes para esta compra.');return}if(mode==='sell'&&c.qty>(data.inventory[c.product]||0)){alert(`Inventario insuficiente: hay ${data.inventory[c.product]||0} uds. de ${productName(c.product)}.`);return}$('dialogTitle').textContent=mode==='buy'?'Confirmar compra':'Confirmar venta';$('dialogSummary').textContent=`${mode==='buy'?'Comprar':'Vender'} ${whole(c.qty)} uds. de ${productName(c.product)} por ${fmt(c.total)} Cr (${fmt(c.rate)}% de tarifa). ${mode==='buy'?'La cartera disminuirÃ¡ y el inventario aumentarÃ¡.':'La cartera aumentarÃ¡ y el inventario disminuirÃ¡.'}`;$('dialogConfirm').textContent='APLICAR OPERACIÃ“N';$('dialogConfirm').className=`confirm-button ${mode==='buy'?'buy-confirm':'sell-confirm'}`;$('confirmDialog').showModal()}
-  function editStock(key,label){editAction=()=>{data.inventory[key]=Math.max(0,Math.trunc(Number($('editValue').value)||0));persist()};$('editTitle').textContent=`Editar ${label}`;$('editLabel').textContent='UNIDADES EN INVENTARIO';$('editValue').value=data.inventory[key]||0;$('editDialog').showModal()}
-  $('systemSearchForm').onsubmit=e=>{e.preventDefault();const query=$('systemSearch').value.trim();if(query)searchSystem(query)};
-  $('travellerSearch').addEventListener('input',renderTravellerIndex);$('travellerCategory').addEventListener('change',renderTravellerIndex);
-  $('buyMode').onclick=()=>{mode='buy';calculateView()};$('sellMode').onclick=()=>{mode='sell';calculateView()};['roll','price','packs','packSize'].forEach(id=>$(id).addEventListener('input',calculateView));$('product').onchange=calculateView;$('confirmBtn').onclick=askConfirm;$('dialogConfirm').onclick=e=>{e.preventDefault();if(pendingCredit)saveCredit();else if(pendingInventorySale)saveInventorySale();else saveTransaction()};$('historyAll').onclick=()=>{historyExpanded=!historyExpanded;renderHistory()};$('undoBtn').onclick=()=>{if(!data.undo)return;data.wallet=data.undo.wallet;data.inventory=data.undo.inventory;data.inventoryDetails=data.undo.inventoryDetails||data.inventoryDetails;data.ships=data.undo.ships||data.ships;data.history=data.undo.history;data.undo=null;if(activeInventoryKey){$('inventoryUnits').value=data.inventory[activeInventoryKey]||0;$('inventoryPackSize').value=data.inventoryDetails[activeInventoryKey]?.packSize||1;$('inventoryUnitValue').value=data.inventoryDetails[activeInventoryKey]?.unitValue||''}persist()};
-  $('creditAddMode').onclick=()=>{creditMode='add';$('creditAddMode').className='mode active-buy';$('creditRemoveMode').className='mode';$('creditConfirm').className='confirm-button buy-confirm';$('creditArrow').textContent='ï¼‹';$('creditConfirmText').textContent='CONFIRMAR INGRESO'};$('creditRemoveMode').onclick=()=>{creditMode='remove';$('creditAddMode').className='mode';$('creditRemoveMode').className='mode active-sell';$('creditConfirm').className='confirm-button sell-confirm';$('creditArrow').textContent='âˆ’';$('creditConfirmText').textContent='CONFIRMAR PÃ‰RDIDA'};$('creditConfirm').onclick=askCreditConfirm;
-  $('editWallet').onclick=()=>{editAction=()=>{const before=data.wallet,next=Math.max(0,Number($('editValue').value)||0);if(next!==before){data.undo={wallet:before,inventory:structuredClone(data.inventory),inventoryDetails:structuredClone(data.inventoryDetails),ships:structuredClone(data.ships||[]),history:structuredClone(data.history)};data.wallet=next;data.history.unshift({id:crypto.randomUUID(),date:new Date().toISOString(),type:'credit',direction:next>before?'add':'remove',amount:Math.abs(next-before),balanceBefore:before,note:'Ajuste manual de cartera'})}persist()};$('editTitle').textContent='Editar cartera';$('editLabel').textContent='CRÃ‰DITOS DISPONIBLES';$('editValue').value=data.wallet;$('editDialog').showModal()};$('editSave').onclick=e=>{e.preventDefault();editAction?.();$('editDialog').close()};$('addStock').onclick=()=>{$('addItemName').value='';$('addItemQuantity').value='1';$('addItemPackSize').value='';$('addItemUnitValue').value='';$('addItemDialog').showModal()};$('addItemForm').onsubmit=e=>{e.preventDefault();const name=$('addItemName').value.trim(),quantity=Math.trunc(Number($('addItemQuantity').value)),normalized=name.toLocaleLowerCase('es'),standard=Object.entries(categories).find(([,savedName])=>savedName.toLocaleLowerCase('es')===normalized),existing=Object.entries(data.custom).find(([,savedName])=>savedName.trim().toLocaleLowerCase('es')===normalized),key=standard?.[0]||existing?.[0]||`custom_${crypto.randomUUID()}`,savedDetails=data.inventoryDetails[key]||{},packSize=Math.max(1,Math.trunc(Number($('addItemPackSize').value)||savedDetails.packSize||1)),unitValue=Math.max(0,Number($('addItemUnitValue').value)||savedDetails.unitValue||0);if(!name||!Number.isFinite(quantity)||quantity<1)return;if(!standard&&!existing)data.custom[key]=name;data.inventory[key]=(data.inventory[key]||0)+quantity;data.inventoryDetails[key]={packSize,unitValue};persist();$('addItemDialog').close()};
-  $('inventoryBackButton').onclick=closeInventoryDetail;$('inventorySaveButton').onclick=saveInventoryDetails;$('inventorySaleMode').onchange=()=>{$('inventorySaleRollField').hidden=$('inventorySaleMode').value!=='commercial';calculateInventorySale()};['inventoryUnits','inventoryPackSize','inventoryUnitValue','inventorySalePacks','inventorySaleRoll'].forEach(id=>$(id).addEventListener('input',calculateInventorySale));$('inventorySaleAction').onclick=askInventorySale;
-  $('appHomeButton').onclick=()=>transitionTo('VOLVIENDO A LAS APLICACIONES',openAppHome,550);
-  document.addEventListener('click',event=>{const button=event.target.closest('button');if(!button||button.disabled)return;button.classList.remove('button-pulse');void button.offsetWidth;button.classList.add('button-pulse');const clearPulse=animationEvent=>{if(animationEvent.target!==button||animationEvent.animationName!=='nexo-button-pulse')return;button.classList.remove('button-pulse');button.removeEventListener('animationend',clearPulse)};button.addEventListener('animationend',clearPulse)},true);
-  $('gamesBtn').onclick=()=>transitionTo('ABRIENDO PARTIDAS',showGames,1100);$('nexoHome').onclick=event=>{event.preventDefault();if(!$('appWorkspace').hidden)transitionTo('VOLVIENDO A LA PDA',openAppHome,1100)};document.querySelectorAll('[data-open-app]').forEach(button=>button.onclick=()=>showApp(button.dataset.openApp));$('quickAppsButton').onclick=()=>{const menu=$('quickAppsMenu');menu.hidden=!menu.hidden;$('quickAppsButton').setAttribute('aria-expanded',String(!menu.hidden))};document.querySelectorAll('#quickAppsMenu [data-open-app]').forEach(button=>button.onclick=()=>{$('quickAppsMenu').hidden=true;$('quickAppsButton').setAttribute('aria-expanded','false');showApp(button.dataset.openApp)});document.addEventListener('click',event=>{if(!event.target.closest('.quick-apps')){$('quickAppsMenu').hidden=true;$('quickAppsButton').setAttribute('aria-expanded','false')}});$('newCampaignForm').onsubmit=e=>{e.preventDefault();const name=$('newCampaignName').value.trim();if(!name)return;const id=crypto.randomUUID();const state=structuredClone(defaults);state.wallet=0;store.campaigns.push({id,name,createdAt:new Date().toISOString(),data:state});$('newCampaignName').value='';transitionTo('CREANDO PARTIDA',()=>openGame(id),1200)};$('renameCampaignForm').onsubmit=e=>{e.preventDefault();const campaign=store.campaigns.find(c=>c.id===$('renameCampaignDialog').dataset.campaignId),name=$('renameCampaignName').value.trim();if(!campaign||!name)return;campaign.name=name;saveLocalStore();queueCloudSave(campaign);$('renameCampaignDialog').close();renderCampaigns();if(campaign.id===activeId)render()};
-  $('addNoteButton').onclick=()=>openNote();$('saveNoteButton').onclick=()=>saveNote(true);$('closeNoteButton').onclick=()=>saveNote(true);$('deleteNoteButton').onclick=deleteNote;[$('noteTitle'),$('noteBody')].forEach(input=>input.addEventListener('input',()=>{$('noteSaveStatus').textContent='CAMBIOS SIN GUARDAR'}));
-  $('backupBtn').onclick=()=>$('backupDialog').showModal();$('exportBtn').onclick=()=>{const blob=new Blob([JSON.stringify({app:'NEXO',version:1,exportedAt:new Date().toISOString(),data:{...data,undo:null}},null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`nexo-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(a.href);$('backupStatus').textContent='Copia exportada.'};$('importInput').onchange=async e=>{try{const file=e.target.files[0];if(!file)return;const parsed=JSON.parse(await file.text()),incoming=parsed.data||parsed;if(typeof incoming.wallet!=='number'||!incoming.inventory)throw Error('Formato no vÃ¡lido');data=normalizeState(incoming);persist();$('backupStatus').textContent='Copia importada correctamente.'}catch{$('backupStatus').textContent='No se pudo importar: archivo invÃ¡lido.'}e.target.value=''};
-  if(cloudClient){$('authForm').onsubmit=async e=>{e.preventDefault();const email=$('authEmail').value.trim().toLowerCase(),password=$('authPassword').value,signingUp=authMode==='signup';$('authSubmit').disabled=true;setAuthMessage('');try{if(authMode==='recovery'){const {error}=await cloudClient.auth.resetPasswordForEmail(email,{redirectTo:siteUrl});if(error)throw error;setAuthMessage('Si existe una cuenta con ese correo, recibirÃ¡s un enlace para recuperar la contraseÃ±a.');return}if(authMode==='new-password'){if(password.length<8)throw Error('La contraseÃ±a debe tener al menos 8 caracteres.');const {data:result,error}=await cloudClient.auth.updateUser({password});if(error)throw error;passwordRecoveryPending=false;setAuthMessage('ContraseÃ±a actualizada.');await activateCloudSession(result.user);return}if(signingUp){if(password.length<8)throw Error('La contraseÃ±a debe tener al menos 8 caracteres.');const {data:result,error}=await cloudClient.auth.signUp({email,password,options:{emailRedirectTo:siteUrl}});if(error)throw error;if(result.session?.user)await activateCloudSession(result.session.user);else setAuthMessage('Cuenta creada. Revisa el correo para verificarla una vez; despuÃ©s entrarÃ¡s con tu contraseÃ±a.')}else{const {data:result,error}=await cloudClient.auth.signInWithPassword({email,password});if(error)throw error;await activateCloudSession(result.user)}}catch(error){setAuthMessage(friendlyAuthError(error),true)}finally{$('authSubmit').disabled=false}};$('authModeButton').onclick=()=>setAuthMode(authMode==='signin'?'signup':'signin');$('forgotPasswordButton').onclick=()=>setAuthMode('recovery');$('authBackButton').onclick=()=>{passwordRecoveryPending=false;setAuthMode('signin')};$('localModeButton').onclick=()=>{$('authGate').hidden=true;cloudUser=null;cloudReady=false;setAccountIdentity();setConnection('DATOS LOCALES');showGames()};$('accountButton').onclick=async()=>{if(cloudUser){if(confirm('Â¿Cerrar sesiÃ³n de NEXO en este dispositivo?'))await cloudClient.auth.signOut()}else{$('authGate').hidden=false;$('gameSelector').hidden=true;$('gameApp').hidden=true;setAuthMode('signin')}}}else{$('accountButton').hidden=true}
-  $('confirmDialog').addEventListener('close',()=>{$('dialogCancel').textContent='CANCELAR';if($('confirmDialog').returnValue==='cancel'||!$('confirmDialog').returnValue){pendingCredit=null;pendingInventorySale=null}});window.addEventListener('storage',e=>{if(e.key===KEY){store=loadStore();const campaign=store.campaigns.find(c=>c.id===activeId);if(campaign){data=normalizeState(campaign.data);render()}else showGames()}});window.addEventListener('focus',refreshCloudCampaigns);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refreshCloudCampaigns()});if('serviceWorker'in navigator&&location.protocol!=='file:')navigator.serviceWorker.register('./sw.js').catch(()=>{});let installPrompt;$('installBtn').onclick=async()=>{if(installPrompt){installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;$('installBtn').hidden=true}};window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;$('installBtn').hidden=false});window.NEXO_CHARACTER_API={getCharacters:()=>data.characters||(data.characters=[]),commitCharacters(){const campaign=store.campaigns.find(c=>c.id===activeId);if(!campaign)return;campaign.data=data;saveLocalStore();queueCloudSave(campaign)}};window.NEXO_HANGAR_API={getShips:()=>data.ships||(data.ships=[]),format:fmt,rate:rowRate,addShip(ship){data.ships.unshift(ship);persist()},deleteShip(id){const ship=data.ships.find(item=>item.id===id);if(!ship)return false;data.undo={wallet:data.wallet,inventory:structuredClone(data.inventory),inventoryDetails:structuredClone(data.inventoryDetails),ships:structuredClone(data.ships),history:structuredClone(data.history)};data.ships=data.ships.filter(item=>item.id!==id);persist();return true},sellShip(id,total,roll,rate){const ship=data.ships.find(item=>item.id===id);if(!ship)return false;const balanceBefore=data.wallet;data.undo={wallet:data.wallet,inventory:structuredClone(data.inventory),inventoryDetails:structuredClone(data.inventoryDetails),ships:structuredClone(data.ships),history:structuredClone(data.history)};data.wallet+=total;data.ships=data.ships.filter(item=>item.id!==id);data.history.unshift({id:crypto.randomUUID(),date:new Date().toISOString(),type:'credit',direction:'add',amount:total,balanceBefore,note:'Venta de nave '+ship.name+' Â· segunda mano'+(roll===null?'':' Â· tirada '+roll+' ('+fmt(rate)+'%)')});persist();pulseGreen(['walletValue','historyList']);return true}};initializeCloud();playIntro();
-})();
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíÛM´Ù:-jZ.¶›­–)Ş³R‚‚’Óâ°Ğ¢6öç7B´U“ÒvæW†ò×G&fVÆÆW"×cs°Ğ¢6öç7B&æG3Õµ²Ô–æf–æ—G’ÃCÃ#UÒÂ³Ã3ÃCUÒÅ³Ã#ÃSÒÅ³"ÃsRÃSUÒÅ³2ÃSÃcÒÅ³BÃ3RÃcUÒÅ³RÃ#RÃsUÒÅ³bÃ#ÃƒÒÅ³rÃRÃƒUÒÅ³‚ÃÃ“ÒÅ³’ÃRÃ“UÒÅ³ÃÃÒÅ³Ã“RÃUÒÅ³"Ã“ÃÒÅ³2ÃƒRÃUÒÅ³BÃƒÃ#ÒÅ³RÃsRÃ#UÒÅ³bÃsÃ3UÒÅ³rÃcRÃSÒÅ³‚ÃSRÃsUÒÅ³’ÃSÃ#ÒÅ³#ÃCÃ3ÒÅ³#Ã#RÃCÕÓ°Ğ¢6öç7B6FVv÷&–W3×¶6ö×öæVçG5ö&6–3¢t6ö×öæVçFW2,:6–6÷2rÆ6ö×öæVçG5öGfæ6VC¢t6ö×öæVçFW2fç¦F÷2rÇfV†–6ÆW5ö&6–3¢ufVŒ:Ö7VÆ÷2,:6–6÷2rÇfV†–6ÆW5öGfæ6VC¢ufVŒ:Ö7VÆ÷2fç¦F÷2rÆÖ–æW&Ç5ö&6–3¢tÖ–æW&ÆW2,:6–6÷2rÆÖ–æW&Ç5÷&V6–÷W3¢tÖ–æW&ÆW2&V6–÷6÷2wÓ°Ğ¢6öç7BFVfVÇG3×·vÆÆWC£CcÆ–çfVçF÷'“¤ö&¦V7Bæg&öÔVçG&–W2„ö&¦V7Bæ¶W—2†6FVv÷&–W2’æÖ†³Óå¶²ÃÒ’’Æ–çfVçF÷'”FWF–Ç3§·ÒÇ6†—3¥µÒÆ6†&7FW'3¥µÒÆ7W7FöÓ§·ÒÆ†—7F÷'“¥µÒÆæ÷FW3¥µÒÆ7W'&VçE7—7FVÓ¦çVÆÂÇVæFó¦çVÆÇÓ°Ğ¢6öç7B6Æ÷VD6Æ–VçC×v–æF÷rææW†õ7W&6T6Æ–VçGÇÆçVÆÂÇ6—FUW&ÃÒv‡GG3¢òöÇ6f6#bÖæWF—¦Vâæv—F‡V"æ–òöæW†ò×G&fVÆÆW"òs°Ğ¢ÆWB7F÷&SÖÆöE7F÷&R‚’Æ7F—fT–C×7F÷&Ræ7F—fT–BÆFF×7G'V7GW&VD6ÆöæR†FVfVÇG2’Æ7F—fU6†—–CÖçVÆÂÆ7F—fT–çfVçF÷'”¶W“ÖçVÆÂÇVæF–æt–çfVçF÷'•6ÆSÖçVÆÂÆ†æv%67&VVãÒvÆ—7BrÇVæF–æt†æv%6ÆSÖçVÆÂÆÖöFSÒv'W’rÆ7&VF—DÖöFSÒvFBrÇVæF–æt7&VF—CÖçVÆÂÆ†—7F÷'”W‡æFVCÖfÇ6RÆVF—D7F–öãÖçVÆÂÆ7F—fTæ÷FT–CÖçVÆÂÆ6Æ÷VEW6W#ÖçVÆÂÆWF„ÖöFSÒw6–væ–ârÆ6Æ÷VE&VG“ÖfÇ6RÇ77v÷&E&V6÷fW'•VæF–æsÖfÇ6RÆ6Æ÷VE6fT6†–ãÕ&öÖ—6Rç&W6öÇfR‚’ÆÖÆö6F–öåVæF–æsÒrr°Ğ¢6öç7BCÖ–CÓæFö7VÖVçBævWDVÆVÖVçD'”–B†–B’Âf×CÖãÓææWr–çFÂäçVÖ&W$f÷&ÖB‚vW2ÔU2rÇ¶Ö†–×VÔg&7F–öäF–v—G3£'Ò’æf÷&ÖB†â’Âv†öÆSÖãÓææWr–çFÂäçVÖ&W$f÷&ÖB‚vW2ÔU2rÇ¶Ö†–×VÔg&7F–öäF–v—G3£Ò’æf÷&ÖB†â’Â6ÆVã×cÓäçVÖ&W"æ—4f–æ—FR‡b“÷c£°Ğ¢gVæ7F–öâæ÷&ÖÆ—¦U7FFR‡&r—¶6öç7BC×&wÇÇ·Ó¶6öç7B–çfVçF÷'“×²ââæFVfVÇG2æ–çfVçF÷'’ÂââæBæ–çfVçF÷'—Ó¶–b†Bæ–çfVçF÷'“òæ&6–2Ó×VæFVf–æVB—¶–çfVçF÷'’çfV†–6ÆW5ö&6–3ÖBæ–çfVçF÷'’æ&6–3¶FVÆWFR–çfVçF÷'’æ&6–7Ö–b†Bæ–çfVçF÷'“òæGfæ6VBÓ×VæFVf–æVB—¶–çfVçF÷'’çfV†–6ÆW5öGfæ6VCÖBæ–çfVçF÷'’æGfæ6VC¶FVÆWFR–çfVçF÷'’æGfæ6VGÖ6öç7B†—7F÷'“Ô'&’æ—4'&’†Bæ†—7F÷'’“öBæ†—7F÷'’æÖ‡GƒÓâ‡²ââçG‚Ç&öGV7C§G‚ç&öGV7CÓÓÒv&6–2sòwfV†–6ÆW5ö&6–2s§G‚ç&öGV7CÓÓÒvGfæ6VBsòwfV†–6ÆW5öGfæ6VBs§G‚ç&öGV7GÒ’“¥µÓ¶ÆWBæ÷FW3Ô'&’æ—4'&’†Bææ÷FW2“öBææ÷FW2æf–ÇFW"†ãÓæâbgG—VöbãÓÓÒvö&¦V7Br’æÖ†ãÓâ‡¶–C¦âæ–GÇÆ7'—Fòç&æFöÕUT”B‚’ÇF—FÆS¥7G&–ær†âçF—FÆWÇÂtæ÷FFRÆ'F–Fr’Æ&öG“¥7G&–ær†âæ&öG—ÇÂrr’ÇWFFVDC¦âçWFFVDGÇÆæWrFFR‚’çFô•4õ7G&–ær‚—Ò’“¥µÓ¶–b‡G—VöbBææ÷FW3ÓÓÒw7G&–ærrbfBææ÷FW2çG&–Ò‚’–æ÷FW3Õ·¶–C¢vÆVv7’Öæ÷FRrÇF—FÆS¢tæ÷FFRÆ'F–FrÆ&öG“¦Bææ÷FW2ÇWFFVDC¦æWrFFR‚’çFô•4õ7G&–ær‚—ÕÓ¶6öç7B6†&7FW'3Ô'&’æ—4'&’†Bæ6†&7FW'2“öBæ6†&7FW'2æf–ÇFW"†3Óæ2bgG—Vöb3ÓÓÒvö&¦V7Br’æÖ†3Óâ‡²ââæ2Æ–C¦2æ–GÇÆ7'—Fòç&æFöÕUT”B‚’ÇW'6öæÃ¦2çW'6öæÇÇÇ·ÒÆ&–öÖWG&–73¦2æ&–öÖWG&–77ÇÇ·ÒÇf—FÇ3¦2çf—FÇ7ÇÇ·ÒÇ6¶–ÆÇ3¤'&’æ—4'&’†2ç6¶–ÆÇ2“ö2ç6¶–ÆÇ3¥µÒÇvVV·3¤ÖF‚æÖ‚ƒÄçVÖ&W"†2çvVV·2—ÇÃ—Ò’“¥µÓ¶6öç7B–çfVçF÷'”FWF–Ç3×·Ó¶f÷"†6öç7B¶¶W’ÆFWF–Ç5Òöbö&¦V7BæVçG&–W2†Bæ–çfVçF÷'”FWF–Ç7ÇÇ·Ò’—¶–çfVçF÷'”FWF–Ç5¶¶W•Ó×·6µ6—¦S¤ÖF‚æÖ‚ƒÄÖF‚çG'Væ2„çVÖ&W"†FWF–Ç3òç6µ6—¦R—ÇÃ’’ÇVæ—EfÇVS¤ÖF‚æÖ‚ƒÄçVÖ&W"†FWF–Ç3òçVæ—EfÇVR—ÇÃ—××&WGW&â²ââç7G'V7GW&VD6ÆöæR†FVfVÇG2’ÂââæBÆ–çfVçF÷'’Æ–çfVçF÷'”FWF–Ç2Ç6†—3¤'&’æ—4'&’†Bç6†—2“öBç6†—2æf–ÇFW"‡3Óç2bgG—Vöb3ÓÓÒvö&¦V7Br’æÖ‡3Óâ‡¶–C§2æ–GÇÆ7'—Fòç&æFöÕUT”B‚’ÆæÖS¥7G&–ær‡2ææÖWÇÂtæfRr’ÇFöæævS¤ÖF‚æÖ‚ƒÄçVÖ&W"‡2çFöæævR—ÇÃ’ÇfÇVS¤ÖF‚æÖ‚ƒÄçVÖ&W"‡2çfÇVR—ÇÃ—Ò’“¥µÒÆ6†&7FW'2Æ7W7FöÓ¦Bæ7W7Fö×ÇÇ·ÒÆ†—7F÷'’Ææ÷FW2ÇVæFó¦çVÆÇ×ĞĞ¢gVæ7F–öâÆöE7F÷&R‚—·G'—¶6öç7B6fVCÖÆö6Å7F÷&vRævWD—FVÒ„´U’“¶–b‡6fVCÓÓÖçVÆÂ—&WGW&â¶7F—fT–C¦çVÆÂÆ6×–vç3¥µ×Ó¶6öç7B'6VCÔ¥4ôâç'6R‡6fVB“¶–b‡'6VCòæ6×–vç2—·'6VBæ6×–vç2æf÷$V6‚†3Óç¶2ææÖSÒ†2ææÖWÇÂu'F–Fr’ç&WÆ6R‚õÇ2¥¼+s®(	2ÕÕÇ2¤äU„õÇ2¢Bö’Ârr’çG&–Ò‚—ÇÂu'F–FwÒ“·&WGW&â'6VGÖ6öç7B–æ—F–ÃÖæ÷&ÖÆ—¦U7FFR‡'6VB“·&WGW&â¶7F—fT–C¢v6×–vâÓrÆ6×–vç3¥·¶–C¢v6×–vâÓrÆæÖS¢u'F–FrÆ7&VFVDC¦æWrFFR‚’çFô•4õ7G&–ær‚’ÆFF¦–æ—F–ÇÕ××Ö6F6‡·&WGW&â¶7F—fT–C¦çVÆÂÆ6×–vç3¥µ×××ĞĞ¢gVæ7F–öâ6fTÆö6Å7F÷&R‚—¶Æö6Å7F÷&vRç6WD—FVÒ„´U’Ä¥4ôâç7G&–æv–g’‡7F÷&R’—ĞĞ¢gVæ7F–öâ6WD66÷VçD–FVçF—G’‡W6W#ÖçVÆÂ—¶6öç7B'WGFöãÒB‚v66÷VçD'WGFöâr“¶–b‚'WGFöâ—&WGW&ã¶6öç7BVÖ–Ã×W6W#òæVÖ–ÇÇÂrs¶'WGFöâçFW‡D6öçFVçCÖVÖ–ÃöVÖ–Âç7Æ—B‚tr•³Òç6Æ–6RƒÃ"’çFôÆö6ÆUWW$66R‚vW2r“¢tâs¶'WGFöâçF—FÆSÖVÖ–Ãö7VVçF¢G¶VÖ–ÇÖ¢t7VVçFäU„òwĞĞ¢gVæ7F–öâ6WD6öææV7F–öâ†ÖW76vRÇ7FFSÒrr—¶6öç7BVÃÒB‚v6öææV7F–öå7FGW2r“¶VÂæ6Æ74æÖSÖ6öææV7F–öâG·7FFWÖ¶VÂæ–ææW$…DÔÃÖÆ“ãÂö“âG¶ÖW76vWÖ²B‚w7–æ4†–çBr’çFW‡D6öçFVçCÖ6Æ÷VEW6W#òu4”ä5$ôä•¤4œ94âU%4ôäÂTåE$REU2D•5õ4•D•dõ2s¢tU…õ%DTä4õ”$4"DDõ2õE$òD•5õ4•D•dòs²B‚v&6·WFW67&—F–öâr’çFW‡D6öçFVçCÖ6Æ÷VEW6W#òtÆ'F–F6RwV&FVâGR7VVçF’6R6–æ7&öæ—¦VçG&RGW2F—7÷6—F—f÷2âW6Væ6÷–¥4ôâ6öÖò&W7ÆFòF–6–öæÂâs¢tÆ÷2FF÷26RwV&FâVâW7FRF—7÷6—F—fòâ&6&Æ÷2÷G&òÂW‡÷'FVæ6÷–R–×;7'FÆÆÌ:Òâs¶Fö7VÖVçBçVW'•6VÆV7F÷$ÆÂ‚rçFÖfö÷FW"7ã¦Æ7BÖ6†–ÆBr’æf÷$V6‚†æöFSÓææöFRçFW‡D6öçFVçCÖ6Æ÷VEW6W#òu4”ä5$ôä•¤DòTâER5TTåDs¢tDDõ2uT$DDõ2TâU5DRD•5õ4•D•dòr—ĞĞ¢gVæ7F–öâVWVT6Æ÷VE6fR†6×–vâ—¶–b‚6Æ÷VD6Æ–VçGÇÂ6Æ÷VEW6W'ÇÂ6×–vâ—&WGW&ã¶6öç7B&÷s×¶–C¦6×–vâæ–BÆ÷væW%ö–C¦6Æ÷VEW6W"æ–BÆæÖS¦6×–vâææÖRÆFF¦6×–vâæFFÓ·6WD6öææV7F–öâ‚u4”ä5$ôä•¤äDòrÂw7–æ6–ærr“¶6Æ÷VE6fT6†–ãÖ6Æ÷VE6fT6†–âçF†Vâ†7–æ2‚“Óç¶6öç7B¶W'&÷'ÓÖv—B6Æ÷VD6Æ–VçBæg&öÒ‚v6×–vç2r’çW6W'B‡&÷rÇ¶öä6öæfÆ–7C¢v–BwÒ“¶–b†W'&÷"—F‡&÷rW'&÷#·6WD6öææV7F–öâ‚tDDõ2TâÄåT$Rr—Ò’æ6F6‚†W'&÷#Óç¶6öç6öÆRæW'&÷"‚täU„ò7–æ2W'&÷"rÆW'&÷"“·6WD6öææV7F–öâ‚tU%$õ"DR4”ä5$ôä•¤4œ94â+r4õ”Äô4Â4ôå4U%dDrÂw7–æ2ÖW'&÷"r—Ò—ĞĞ¢gVæ7F–öâW'6—7B‚—¶6öç7B6×–vã×7F÷&Ræ6×–vç2æf–æB†3Óæ2æ–CÓÓÖ7F—fT–B“¶–b†6×–vâ–6×–vâæFFÖFF·7F÷&Ræ7F—fT–CÖ7F—fT–C·6fTÆö6Å7F÷&R‚“·&VæFW"‚“·VWVT6Æ÷VE6fR†6×–vâ—ĞĞ¢gVæ7F–öâ6WDWF„ÖW76vR†ÖW76vRÆW'&÷#ÖfÇ6R—²B‚vWF„ÖW76vRr’çFW‡D6öçFVçCÖÖW76vS²B‚vWF„ÖW76vRr’æ6Æ74Æ—7BçFövvÆR‚vW'&÷"rÆW'&÷"—ĞĞ¢gVæ7F–öâg&–VæFÇ”WF„W'&÷"†W'&÷"—¶6öç7BÖW76vSÕ7G&–ær†W'&÷#òæÖW76vWÇÂrr’çFôÆ÷vW$66R‚“¶–b†ÖW76vRæ–æ6ÇVFW2‚w&FRÆ–Ö—Br—ÇÆÖW76vRæ–æ6ÇVFW2‚wFöòÖç’&WVW7G2r’—&WGW&âu6R†Æ6ç¦FòVÂÌ:ÖÖ—FRFV×÷&ÂFR6÷'&V÷2FR'VV&âW7W&&÷†–ÖFÖVçFRVæ†÷&çFW2FRföÇfW"6öÆ–6—F"÷G&òVæÆ6Râs¶–b†ÖW76vRæ–æ6ÇVFW2‚vVÖ–ÂFG&W72æ÷BWF†÷&—¦VBr—ÇÆÖW76vRæ–æ6ÇVFW2‚vVÖ–ÅöFG&W75öæ÷EöWF†÷&—¦VBr’—&WGW&âtVÂ6÷'&VòFR'VV&FR7W&6R6öÆòVVFRVçf–'6RÖ–VÖ'&÷2FVÂWV—òâ&Vçf–"6÷'&V÷27VÇV–W"W'6öæ†’VR6öæf–wW&"Vâ&÷fVVF÷"FR6÷'&Vòâs¶–b†ÖW76vRæ–æ6ÇVFW2‚v–çfÆ–BÆöv–â7&VFVçF–Ç2r’—&WGW&âtVÂ6÷'&VòòÆ6öçG&6\;æò6ö–æ6–FVââ6’6&2FR7&V"Æ7VVçFÂ&–ÖW&òFV&W2fW&–f–6"VÂ6÷'&Vòâs·&WGW&âW'&÷#òæÖW76vWÇÂtæò6RVFò6ö×ÆWF"VÂ66W6òâ–çL:–çFÆòFRçVWfòâwĞĞ¢gVæ7F–öâ6†÷tWF„vFR‚—¶6Æ÷VEW6W#ÖçVÆÃ¶6Æ÷VE&VG“ÖfÇ6S·6WD66÷VçD–FVçF—G’‚“²B‚vvÖU6VÆV7F÷"r’æ†–FFVã×G'VS²B‚vvÖTr’æ†–FFVã×G'VS²B‚vWF„vFRr’æ†–FFVãÖfÇ6S²B‚vWF„VÖ–Âr’æfö7W2‚“·6WDWF„ÖöFR‚w6–væ–âr“·6WD6öææV7F–öâ‚t”ä”4”4U4œ94âr—ĞĞ¢gVæ7F–öâ6WDWF„ÖöFR†ÖöFR—¶WF„ÖöFSÖÖöFS¶6öç7B6–væ–æuWÖÖöFSÓÓÒw6–vçWrÇ&V6÷fW'“ÖÖöFSÓÓÒw&V6÷fW'’rÆæWu77v÷&CÖÖöFSÓÓÒvæWr×77v÷&Bs²B‚vWF…F—FÆRr’çFW‡D6öçFVçC×6–væ–æuWòt7&V"7VVçFW'6öæÂs§&V6÷fW'“òu&V7WW&"6öçG&6\;s¦æWu77v÷&Còt7&V"6öçG&6\;çVWfs¢t66VFRGR7VVçFs²B‚vWF„–çG&òr’çFW‡D6öçFVçC×6–væ–æuWòt7&VGR7VVçF&6–æ7&öæ—¦"GW2'F–F2VçG&RF—7÷6—F—f÷2âs§&V6÷fW'“òuFRVçf–&VÖ÷2VâVæÆ6R&VÆVv—"Væ6öçG&6\;çVWfâs¦æWu77v÷&CòtVÆ–vRVæ6öçG&6\;çVWf&GR7VVçFâs¢tVçG&6öâGR6÷'&Vò’6öçG&6\;âs²B‚vWF…7V&Ö—Br’çFW‡D6öçFVçC×6–væ–æuWòt5$T"5TTåDs§&V6÷fW'“òtTåd”"TäÄ4RDR$T5UU$4œ94âs¦æWu77v÷&CòtuT$D"4ôåE$4\9s¢t”ä”4”"4U4œ94âs²B‚vWF…77v÷&DÆ&VÂr’çFW‡D6öçFVçC×6–væ–æuWòt5$TTä4ôåE$4\9s¦æWu77v÷&CòtåTUd4ôåE$4\9s¢t4ôåE$4\9s²B‚vWF…77v÷&Br’æWFö6ö×ÆWFS×6–væ–æuWÇÆæWu77v÷&CòvæWr×77v÷&Bs¢v7W'&VçB×77v÷&Bs²B‚vWF…77v÷&Br’çÆ6V†öÆFW#×6–væ–æuWÇÆæWu77v÷&CòtÜ:Öæ–Öò‚6&7FW&W2s¢uGR6öçG&6\;s²B‚vWF…77v÷&Br’ç&WV—&VCÒ&V6÷fW'“²B‚vWF…77v÷&Df–VÆBr’æ†–FFVã×&V6÷fW'“²B‚vWF„VÖ–Äf–VÆBr’æ†–FFVãÖæWu77v÷&C²B‚vWF„VÖ–Âr’ç&WV—&VCÒæWu77v÷&C²B‚vWF„ÖöFT'WGFöâr’æ†–FFVã×&V6÷fW'—ÇÆæWu77v÷&C²B‚vWF„&6´'WGFöâr’æ†–FFVãÒ‡&V6÷fW'—ÇÆæWu77v÷&B“²B‚vf÷&v÷E77v÷&D'WGFöâr’æ†–FFVã×6–væ–æuWÇÇ&V6÷fW'—ÇÆæWu77v÷&C²B‚vÆö6ÄÖöFT'WGFöâr’æ†–FFVãÖæWu77v÷&C²B‚vWF„ÖöFT'WGFöâr’çFW‡D6öçFVçC×6–væ–æuWò|+õ–F–VæW27VVçFò–æ–6–6W6œ;6âs¢|+ôæòF–VæW27VVçFò&V|:×7G&FRs·6WDWF„ÖW76vR‚rr—ĞĞ¢7–æ2gVæ7F–öâ7F—fFT6Æ÷VE6W76–öâ‡W6W"—¶–b‚W6W'ÇÂ6Æ÷VD6Æ–VçGÇÆ6Æ÷VEW6W#òæ–CÓÓ×W6W"æ–B—&WGW&ã¶6Æ÷VEW6W#×W6W#·6WD66÷VçD–FVçF—G’‡W6W"“·6WD6öææV7F–öâ‚t4$täDò5TTåDrÂw7–æ6–ærr“¶ÆWB¶FF§&VÖ÷FU&÷w2ÆW'&÷'ÓÖv—B6Æ÷VD6Æ–VçBæg&öÒ‚v6×–vç2r’ç6VÆV7B‚r¢r’æ÷&FW"‚v7&VFVEöBrÇ¶66VæF–æs§G'VWÒ“¶–b‡77v÷&E&V6÷fW'•VæF–ær—&WGW&ã¶–b†W'&÷"—¶6Æ÷VEW6W#ÖçVÆÃ·6†÷tWF„vFR‚“·6WDWF„ÖW76vR‚tæò6RVF–W&öâ6&v"GW2'F–F2â6ö×'VV&Æ6öæW†œ;6âR–çL:–çFÆòFRçVWfòârÇG'VR“·&WGW&çĞĞ¢–b‚&VÖ÷FU&÷w2æÆVæwF‚—¶6öç7BÆö6ÃÖÆöE7F÷&R‚’Æ–DÖÖæWrÖ‚’Ç&÷w3ÖÆö6Âæ6×–vç2æÖ†3Óç¶6öç7B–CÖ7'—Fòç&æFöÕUT”B‚“¶–DÖç6WB†2æ–BÆ–B“·&WGW&ç¶–BÆ÷væW%ö–C§W6W"æ–BÆæÖS¦2ææÖRÆFF¦æ÷&ÖÆ—¦U7FFR†2æFF’Æ7&VFVEöC¦2æ7&VFVDGÇÆæWrFFR‚’çFô•4õ7G&–ær‚—×Ò“¶–b‡&÷w2æÆVæwF‚—¶6öç7B&W7VÇCÖv—B6Æ÷VD6Æ–VçBæg&öÒ‚v6×–vç2r’æ–ç6W'B‡&÷w2’ç6VÆV7B‚r¢r“¶–b‡&W7VÇBæW'&÷"—¶6Æ÷VEW6W#ÖçVÆÃ·6†÷tWF„vFR‚“·6WDWF„ÖW76vR‚tæò6RVFò6–æ7&öæ—¦"Æ6÷–FRW7FRF—7÷6—F—fòâGW2FF÷2Æö6ÆW26–wVVâ–çF7F÷2ârÇG'VR“·&WGW&ç×&VÖ÷FU&÷w3×&W7VÇBæFF¶Æö6Å7F÷&vRç6WD—FVÒ„´U’Ä¥4ôâç7G&–æv–g’‡¶7F—fT–C¦–DÖævWB†Æö6Âæ7F—fT–B—ÇÇ&VÖ÷FU&÷w5³Óòæ–BÆ6×–vç3§&VÖ÷FU&÷w2æÖ‡#Óâ‡¶–C§"æ–BÆæÖS§"ææÖRÆ7&VFVDC§"æ7&VFVEöBÆFF¦æ÷&ÖÆ—¦U7FFR‡"æFF—Ò’—Ò’—×ĞĞ¢7F÷&S×¶7F—fT–C¦çVÆÂÆ6×–vç3§&VÖ÷FU&÷w2æÖ‡#Óâ‡¶–C§"æ–BÆæÖS§"ææÖRÆ7&VFVDC§"æ7&VFVEöBÆFF¦æ÷&ÖÆ—¦U7FFR‡"æFF—Ò’—Ó¶6öç7B66†VCÒ‚‚“Óç·G'—·&WGW&â¥4ôâç'6R†Æö6Å7F÷&vRævWD—FVÒ„´U’—ÇÂw·Òr—Ö6F6‡·&WGW&ç·××Ò’‚“·7F÷&Ræ7F—fT–C×7F÷&Ræ6×–vç2ç6öÖR†3Óæ2æ–CÓÓÖ66†VBæ7F—fT–B“ö66†VBæ7F—fT–C§7F÷&Ræ6×–vç5³Óòæ–GÇÆçVÆÃ¶7F—fT–C×7F÷&Ræ7F—fT–C·6fTÆö6Å7F÷&R‚“¶6Æ÷VE&VG“×G'VS·6WD6öææV7F–öâ‚tDDõ2TâÄåT$Rr“²B‚vWF„vFRr’æ†–FFVã×G'VS²B‚vvÖTr’æ†–FFVã×G'VS²B‚vvÖU6VÆV7F÷"r’æ†–FFVãÖfÇ6S·&VæFW$6×–vç2‚—ĞĞ¢7–æ2gVæ7F–öâ–æ—F–Æ—¦T6Æ÷VB‚—¶6Æ÷VEW6W#ÖçVÆÃ¶6Æ÷VE&VG“ÖfÇ6S·6WD66÷VçD–FVçF—G’‚“²B‚v66÷VçD'WGFöâr’æ†–FFVã×G'VS·6WD6öææV7F–öâ‚tDDõ2Äô4ÄU2r“·6†÷tvÖW2‚—ĞĞ¢7–æ2gVæ7F–öâ&Vg&W6„6Æ÷VD6×–vç2‚—¶–b‚6Æ÷VEW6W'ÇÂ6Æ÷VE&VG—ÇÆFö7VÖVçBçf—6–&–Æ—G•7FFSÓÓÒv†–FFVâr—&WGW&ã¶v—B6Æ÷VE6fT6†–ã¶6öç7B¶FF§&÷w2ÆW'&÷'ÓÖv—B6Æ÷VD6Æ–VçBæg&öÒ‚v6×–vç2r’ç6VÆV7B‚r¢r’æ÷&FW"‚v7&VFVEöBrÇ¶66VæF–æs§G'VWÒ“¶–b†W'&÷"—·6WD6öææV7F–öâ‚u4”â4ôäU„œ94â+r4õ”Äô4Â4ôå4U%dDrÂw7–æ2ÖW'&÷"r“·&WGW&çÖ6öç7B&Wf–÷W3Ö7F—fT–C·7F÷&S×¶7F—fT–C§&Wf–÷W2Æ6×–vç3§&÷w2æÖ‡#Óâ‡¶–C§"æ–BÆæÖS§"ææÖRÆ7&VFVDC§"æ7&VFVEöBÆFF¦æ÷&ÖÆ—¦U7FFR‡"æFF—Ò’—Ó¶–b‚7F÷&Ræ6×–vç2ç6öÖR†3Óæ2æ–CÓÓ×&Wf–÷W2’—7F÷&Ræ7F—fT–C×7F÷&Ræ6×–vç5³Óòæ–GÇÆçVÆÃ¶7F—fT–C×7F÷&Ræ7F—fT–C¶6öç7B7W'&VçC×7F÷&Ræ6×–vç2æf–æB†3Óæ2æ–CÓÓÖ7F—fT–B“¶–b†7W'&VçB–FFÖæ÷&ÖÆ—¦U7FFR†7W'&VçBæFF“·6fTÆö6Å7F÷&R‚“·6WD6öææV7F–öâ‚tDDõ2TâÄåT$Rr“¶–b‚B‚vvÖU6VÆV7F÷"r’æ†–FFVâ—&VæFW$6×–vç2‚“¶VÇ6R–b‚B‚vvÖTr’æ†–FFVâ—&VæFW"‚—ĞĞ¢6öç7B–çG&õFV×ÆFSÒB‚v–çG&õ67&VVâr’æ6ÆöæTæöFR‡G'VR“°Ğ¢gVæ7F–öâG&ç6—F–öåFò†ÖW76vRÆ6ÆÆ&6²ÆGW&F–öãÓ#—¶6öç7B67&VVãÖ–çG&õFV×ÆFRæ6ÆöæTæöFR‡G'VR’ÆÆ&VÃ×67&VVâçVW'•6VÆV7F÷"‚r6–çG&ôÖW76vRr’ÆÖ&³×67&VVâçVW'•6VÆV7F÷"‚r6–çG&ôÖ&²r’Æ&#×67&VVâçVW'•6VÆV7F÷"‚ræ–çG&ò×&öw&W727âr“·67&VVâç&VÖ÷fTGG&–'WFR‚v–Br“·67&VVâæ6Æ74Æ—7BæFB‚wG&ç6—F–öâÖ÷fW&Æ’r“¶Æ&VÂç&VÖ÷fTGG&–'WFR‚v–Br“¶Ö&²ç&VÖ÷fTGG&–'WFR‚v–Br“¶Æ&VÂçFW‡D6öçFVçCÖÖW76vS·67&VVâç7G–ÆRææ–ÖF–öäGW&F–öãÖG¶GW&F–öçÖ×6¶&"ç7G–ÆRææ–ÖF–öäGW&F–öãÖG¶GW&F–öâÓSÖ×6¶Fö7VÖVçBæ&öG’æVæB‡67&VVâ“¶6ÆÆ&6³òâ‚“·6WEF–ÖV÷WB‚‚“Óç67&VVâç&VÖ÷fR‚’ÆGW&F–öâ³ƒ—ĞĞ¢gVæ7F–öâÆ”–çG&ò‚—¶6öç7B67&VVãÒB‚v–çG&õ67&VVâr“¶–b‡67&VVâ—6WEF–ÖV÷WB‚‚“Óç67&VVâç&VÖ÷fR‚’Ã#—ĞĞ¢gVæ7F–öâ6†÷tvÖW2‚—¶–b‚B‚vv÷&·76Rr’æ†–FFVâbbB‚vv÷&·76Rr’æFF6WBçf–WsÓÓÒvæ÷FW2rbbB‚væ÷FTVF—F÷"r’æ†–FFVâbb6fTæ÷FR‚’—&WGW&ã²B‚vvÖTr’æ†–FFVã×G'VS²B‚vvÖU6VÆV7F÷"r’æ†–FFVãÖfÇ6S·&VæFW$6×–vç2‚’ĞĞ¢gVæ7F–öâ÷VävÖR†–B—¶6öç7B6×–vã×7F÷&Ræ6×–vç2æf–æB†3Óæ2æ–CÓÓÖ–B“¶–b‚6×–vâ—&WGW&ã¶7F—fT–CÖ–C¶FFÖæ÷&ÖÆ—¦U7FFR†6×–vâæFF“·7F÷&Ræ7F—fT–CÖ–C·6fTÆö6Å7F÷&R‚“·VWVT6Æ÷VE6fR†6×–vâ“²B‚vvÖU6VÆV7F÷"r’æ†–FFVã×G'VS²B‚vvÖTr’æ†–FFVãÖfÇ6S·&VæFW"‚“¶÷Vä†öÖR‚—ĞĞ¢gVæ7F–öâ&VæFW$6×–vç2‚—¶6öç7BÆ—7CÒB‚v6×–väÆ—7Br“¶Æ—7Bç&WÆ6T6†–ÆG&Vâ‚“·7F÷&Ræ6×–vç2æf÷$V6‚†3Óç¶6öç7B6&CÖFö7VÖVçBæ7&VFTVÆVÖVçB‚v'F–6ÆRr“¶6&Bæ6Æ74æÖSÒv6×–vâÖ6&Bs¶6öç7B—FVÔ6÷VçCÔö&¦V7BçfÇVW2†2æFFæ–çfVçF÷'—ÇÇ·Ò’ç&VGV6R‚†Æâ“Óæ²„çVÖ&W"†â—ÇÃ’Ã“¶6&Bæ–ææW$…DÔÃÖÆF—b6Æ73Ò&6×–vâÖÖ&²#äãÂöF—cãÆF—b6Æ73Ò&6×–vâÖ–æfò#ãÇ6ÖÆÃä4Õ9E$dTÄÄU#Â÷6ÖÆÃãÆƒ#ãÂöƒ#ãÇ7ããÂ÷7ããÂöF—cãÆF—b6Æ73Ò&6×–vâ×7FG2#ãÆ#âG¶f×B†2æFFçvÆÆWGÇÃ—Ò7#Âö#ãÇ6ÖÆÃâG¶—FVÔ6÷VçGÒ:×FV×2+rG²†2æFFæ†—7F÷'—ÇÅµÒ’æÆVæwF‡Ò÷W&6–öæW3Â÷6ÖÆÃãÂöF—cãÆ'WGFöâ6Æ73Ò&6×–vâ×&VæÖR"G—SÒ&'WGFöâ"F—FÆSÒ%&VæöÖ'&"'F–F"&–ÖÆ&VÃÒ%&VæöÖ'&"'F–F#î)ÈãÂö'WGFöããÆ'WGFöâ6Æ73Ò&6×–vâÖ÷Vâ#äTåE$"(i#Âö'WGFöãæ¶6&BçVW'•6VÆV7F÷"‚vƒ"r’çFW‡D6öçFVçCÖ2ææÖS¶6&BçVW'•6VÆV7F÷"‚ræ6×–vâÖ–æfò7âr’çFW‡D6öçFVçCÖ2æ–CÓÓÖ7F—fT–Còu%D”D5D•ds¦6Æ÷VEW6W#òu4”ä5$ôä•¤DTâER5TTåDs¢tuT$DDTâU5DRD•5õ4•D•dòs¶6&BçVW'•6VÆV7F÷"‚ræ6×–vâÖ÷Vâr’æöæ6Æ–6³Ò‚“ÓçG&ç6—F–öåFò‚t4$täDò%D”DrÂ‚“Óæ÷VävÖR†2æ–B’Ã#“¶6&BçVW'•6VÆV7F÷"‚ræ6×–vâ×&VæÖRr’æöæ6Æ–6³Ò‚“Óç7F'E&VæÖR†2æ–B“¶Æ—7BæVæB†6&B—Ò—ĞĞ¢gVæ7F–öâ7F'E&VæÖR†–B—¶6öç7B6×–vã×7F÷&Ræ6×–vç2æf–æB†3Óæ2æ–CÓÓÖ–B“¶–b‚6×–vâ—&WGW&ã²B‚w&VæÖT6×–väæÖRr’çfÇVSÖ6×–vâææÖS²B‚w&VæÖT6×–väF–Æörr’æFF6WBæ6×–vä–CÖ–C²B‚w&VæÖT6×–väF–Æörr’ç6†÷tÖöFÂ‚“²B‚w&VæÖT6×–väæÖRr’æfö7W2‚—ĞĞ¢gVæ7F–öâ&÷u&FR‡&öÆÂ—¶–b‡&öÆÃÃÒÓ—&WGW&å²Ô–æf–æ—G’ÃCÃ#UÓ¶–b‡&öÆÃãÓ#—&WGW&å³#Ã#RÃCÓ·&WGW&â&æG2æf–æB‚…·&W7VÇEÒ“Óç&W7VÇCÓÓ×&öÆÂ—ÇÅ²Ô–æf–æ—G’ÃCÃ#U×ĞĞ¢gVæ7F–öâ6Æ2‚—¶6öç7B&VCÖ–CÓç¶6öç7B&sÒB†–B’çfÇVRçG&–Ò‚“¶–b‚&r—&WGW&âçVÆÃ¶6öç7BfÇVSÔçVÖ&W"‡&r“·&WGW&âçVÖ&W"æ—4f–æ—FR‡fÇVR“÷fÇVS¦çVÆÇÒÇ&öÆÅfÇVS×&VB‚w&öÆÂr’Ç&öÆÃ×&öÆÅfÇVSÓÓÖçVÆÃöçVÆÃ¤ÖF‚çG'Væ2‡&öÆÅfÇVR’Ç&–6S×&VB‚w&–6Rr’Ç6·5fÇVS×&VB‚w6·2r’Ç6·3×6·5fÇVSÓÓÖçVÆÃöçVÆÃ¤ÖF‚çG'Væ2‡6·5fÇVR’Ç6µ6—¦UfÇVS×&VB‚w6µ6—¦Rr’Ç6µ6—¦S×6µ6—¦UfÇVSÓÓÖçVÆÃöçVÆÃ¤ÖF‚çG'Væ2‡6µ6—¦UfÇVR’Ç&öGV7CÒB‚w&öGV7Br’çfÇVRÇG“×6·3ÓÓÖçVÆÇÇÇ6µ6—¦SÓÓÖçVÆÃöçVÆÃ§6·2§6µ6—¦RÆ&æC×&öÆÃÓÓÖçVÆÃöçVÆÃ§&÷u&FR‡&öÆÂ’Ç&FSÖ&æCö&æE¶ÖöFSÓÓÒv'W’só£%Ó¦çVÆÂÆ&6S×&FRÇVæ—C×&–6SÓÓÖçVÆÇÇÇ&FSÓÓÖçVÆÃöçVÆÃ§&–6R§&FRóÇF÷FÃ×Væ—CÓÓÖçVÆÇÇÇG“ÓÓÖçVÆÇÇÂ&öGV7CöçVÆÃ§Væ—B§G“·&WGW&ç·&öÆÂÇ&–6RÇ6·2Ç6µ6—¦RÇG’Æ&6RÇ&FRÇVæ—BÇF÷FÂÇ&öGV7G×ĞĞ¢gVæ7F–öâ&W6WEG&FTf÷&Ò‚—µ²w&öÆÂrÂw&–6RrÂw6·2rÂw6µ6—¦RuÒæf÷$V6‚†–CÓâB†–B’çfÇVSÒrr“²B‚w&öGV7Br’çfÇVSÒrs¶6Æ7VÆFUf–Wr‚—ĞĞ¢gVæ7F–öâ&öGV7DæÖR†¶W’—·&WGW&â6FVv÷&–W5¶¶W•×ÇÆFFæ7W7FöÕ¶¶W•×ÇÂ|8×FVÒW'6öæÆ—¦FòwĞĞ¢gVæ7F–öâ&VæFW"‚—¶–b‚FF—&WGW&ã¶6öç7B6×–vã×7F÷&Ræ6×–vç2æf–æB†3Óæ2æ–CÓÓÖ7F—fT–B“²B‚v7F—fT6×–våF—FÆRr’çFW‡D6öçFVçCÖ6×–vãòææÖWÇÂt6VçG&òFR6öÖW&6–òs²B‚wF6×–väæÖRr’çFW‡D6öçFVçCÒ†6×–vãòææÖWÇÂu%D”Dr’çFôÆö6ÆUWW$66R‚vW2r“²B‚wv÷&·76T6×–vâr’çFW‡D6öçFVçCÖ6×–vãòææÖWÇÂrs²B‚wvÆÆWEfÇVRr’æ–ææW$…DÔÃÖG·v†öÆR†FFçvÆÆWB—ÒÇ6ÖÆÃä7#Â÷6ÖÆÃæ¶6öç7BF÷FÄ—FV×3Ôö&¦V7BçfÇVW2†FFæ–çfVçF÷'’’ç&VGV6R‚†Æâ“Óæ²„çVÖ&W"†â—ÇÃ’Ã“²B‚v—FV×5fÇVRr’æ–ææW$…DÔÃÖG·v†öÆR‡F÷FÄ—FV×2—ÒÇ6ÖÆÃçVG2ãÂ÷6ÖÆÃæ²B‚v÷W&F–öç5fÇVRr’æ–ææW$…DÔÃÖG·v†öÆR†FFæ†—7F÷'’æÆVæwF‚—ÒÇ6ÖÆÃç&Vw2ãÂ÷6ÖÆÃæ·&VæFW%7Fö6·2‚“·&VæFW$7W7FöÒ‚“·&VæFW%&öGV7D÷F–öç2‚“·&VæFW$†—7F÷'’‚“·&VæFW$æ÷FW2‚“·&VæFW$–çfVçF÷'”FWF–Â‚“·v–æF÷rääU„õô„ät%õT“òç&VæFW"‚“·v–æF÷rääU„õô4„$5DU%5õT“òç&VæFW"‚“²B‚wVæFô'Fâr’æF—6&ÆVCÒFFçVæFó¶6Æ7VÆFUf–Wr‚“¶–b‚B‚vv÷&·76Rr’æFF6WBçf–WsÓÓÒvÖr—&VæFW$Ö‚’ĞĞ¢gVæ7F–öâ÷Vä†öÖR‚—¶–b‚B‚vv÷&·76Rr’æ†–FFVâbbB‚vv÷&·76Rr’æFF6WBçf–WsÓÓÒvæ÷FW2rbbB‚væ÷FTVF—F÷"r’æ†–FFVâbb6fTæ÷FR‚’—&WGW&ã²B‚vv÷&·76Rr’æ†–FFVã×G'VS²B‚v†öÖRr’æ†–FFVãÖfÇ6WĞĞ¢gVæ7F–öâ6†÷t†—¶6öç7BæÖW3×¶6Æ7VÆF÷#¢t4ôÔU$4”òrÆ–çfVçF÷'“¢t”ådTåD$”òrÇvÆÆWC¢t4%DU$rÆæ÷FW3¢täõD2rÆ7F—f—G“¢u$Tt•5E$òrÆÖ¢tÔrÇG&fVÆÆW#¢uE$dTÄÄU"rÆ†æv#¢t„ät"rÆ6†&7FW'3¢uU%4ôä¤U2wÓ·G&ç6—F–öåFò†4ôäT5DäDò+rG¶æÖW5¶×ÇÂtÜ94ETÄòwÖÂ‚“Óæ÷Vä†’Ã#—ĞĞ¢gVæ7F–öâ÷Vä†—¶6öç7BæÖW3×¶6Æ7VÆF÷#¢t4ôÔU$4”òrÆ–çfVçF÷'“¢t”ådTåD$”òrÇvÆÆWC¢t4%DU$rÆæ÷FW3¢täõD2rÆ7F—f—G“¢u$Tt•5E$òrÆÖ¢tÔrÇG&fVÆÆW#¢uE$dTÄÄU"rÆ†æv#¢t„ät"rÆ6†&7FW'3¢uU%4ôä¤U2wÓ²B‚v†öÖRr’æ†–FFVã×G'VS²B‚vv÷&·76Rr’æ†–FFVãÖfÇ6S²B‚vv÷&·76Rr’æFF6WBçf–WsÖ²B‚wv÷&·76UF—FÆRr’çFW‡D6öçFVçCÖæÖW5¶×ÇÂtÄ”44œ94âs²B‚wv÷&·76T6×–vâr’çFW‡D6öçFVçC×7F÷&Ræ6×–vç2æf–æB†3Óæ2æ–CÓÓÖ7F—fT–B“òææÖWÇÂrs¶–b†ÓÓÒv–çfVçF÷'’r–6Æ÷6T–çfVçF÷'”FWF–Â‚“¶–b†ÓÓÒvÖr—·&VæFW$Ö‚—Ö–b†ÓÓÒwG&fVÆÆW"r—·&VæFW%G&fVÆÆW$–æFW‚‚“²B‚wG&fVÆÆW%6V&6‚r’æfö7W2‚—Ö–b†ÓÓÒv†æv"r—v–æF÷rääU„õô„ät%õT“òæ÷Vâ‚“¶–b†ÓÓÒv6†&7FW'2r—v–æF÷rääU„õô4„$5DU%5õT“òæ÷Vâ‚“¶–b†ÓÓÒvæ÷FW2r—¶7F—fTæ÷FT–CÖçVÆÃ²B‚vFDæ÷FT'WGFöâr’æ†–FFVãÖfÇ6S²B‚væ÷FTVF—F÷"r’æ†–FFVã×G'VS²B‚væ÷FW4Æ—7Br’æ†–FFVãÖfÇ6S·&VæFW$æ÷FW2‚—×ĞĞ¢gVæ7F–öâæ÷&ÖÆ—¦U6V&6‚‡fÇVR—·&WGW&â7G&–ær‡fÇVWÇÂrr’ææ÷&ÖÆ—¦R‚tädBr’ç&WÆ6R‚õµÇS3ÕÇS3feÒörÂrr’çFôÆö6ÆTÆ÷vW$66R‚vW2r’çG&–Ò‚—ĞĞ¢gVæ7F–öâ&VæFW%G&fVÆÆW$–æFW‚‚—¶6öç7B†÷7CÒB‚wG&fVÆÆW%&W7VÇG2r“¶–b‚†÷7B—&WGW&ã¶6öç7BVW'“Öæ÷&ÖÆ—¦U6V&6‚‚B‚wG&fVÆÆW%6V&6‚r’çfÇVR’Æ6FVv÷'“ÒB‚wG&fVÆÆW$6FVv÷'’r’çfÇVRÆ–æFWƒ×v–æF÷rääU„õõE$dTÄÄU%ô”äDU‡ÇÅµÓ¶†÷7Bç&WÆ6T6†–ÆG&Vâ‚“¶–b‚VW'’—¶6öç7B&ö×CÖFö7VÖVçBæ7&VFTVÆVÖVçB‚vF—br“·&ö×Bæ6Æ74æÖSÒwG&fVÆÆW"ÖV×G’s·&ö×Bæ–ææW$…DÔÃÒsÇ7ãî(ÉSÂ÷7ããÆ#ä'W66VâFVÖFVÂÖçVÃÂö#ãÇ6ÖÆÃå'VV&6öâ*¶6öÖW&6–ü+²Â*¶æfW<+²Â*·W'6öæ¦W<+²Â*¶WV—ü+²ò*¶×VæF÷<+²ãÂ÷6ÖÆÃâs¶†÷7BæVæB‡&ö×B“·&WGW&çÖ6öç7B7F÷v÷&G3ÖæWr6WB…²vFRrÂvFVÂrÂvÆrÂvVÂrÂvÆ2rÂvÆ÷2rÂw’rÂvVârÂvrÂw&rÂw÷"rÂv6öârÂwVârÂwVæuÒ“¶6öç7BFW&×3×VW'’ç7Æ—B‚õÇ2²ò’æf–ÇFW"‡FW&ÓÓçFW&Òbb7F÷v÷&G2æ†2‡FW&Ò’“¶–b‚FW&×2æÆVæwF‚—¶6öç7BV×G“ÖFö7VÖVçBæ7&VFTVÆVÖVçB‚vF—br“¶V×G’æ6Æ74æÖSÒwG&fVÆÆW"ÖV×G’s¶V×G’æ–ææW$…DÔÃÒsÇ7ãî(ÉSÂ÷7ããÆ#äW67&–&RVæÆ'&6ÆfSÂö#ãÇ6ÖÆÃå÷"V¦V×Æó¢6öÖW&6–òÂ?6Ókh‘éì¶»§q«^wYJœ›ÙXİ
+_XÃBˆ›ÙKœ]Y\TÙ[XİÜŠ	Ëš\İÜKY\ØÈÛX[	ÊK^ÛÛ[[™]È]J™]JKÓØØ[Tİš[™Ê	Ù\ËQTÉËÙ]Tİ[N‰ÜÚÜ	Ë[YTİ[N‰ÜÚÜ	ßJNÃBˆ›ÙKœ]Y\TÙ[XİÜŠ	Ëš\İÜKX[[İ[	ÊKš[›™\’SX	Ú\ĞÜ™Y]Ê™\™Xİ[ÛOOIØY	ÏÉÊÉÎ‰ø¢$‰ÊN›[ÙOOOIØ^IÏÉø¢$‰Î‰ÊÉßIÙ›]
+\ĞÜ™Y]İ˜[[İ[İ[
+_HÜÛX[‰Ú\ĞÜ™Y]ÉÓ[İš[ZY[ÈHØ\\˜IÎœ›ÛOO[[Ø	İ››İOËš[˜ÛY\Ê	ÛÜ™[˜\šXIÊOÉÕ™[HÜ™[˜\šXH0­È	Î‰ÉßIÙ›]
+œ˜]J_IX˜\˜YH	İœ›ÛH0­È	Ù›]
+œ˜]J_IXOÜÛX[˜ÃBˆ›ÙKœ]Y\TÙ[XİÜŠ	Ëš\İÜKXÛÛ˜Ù\‰ÊK^ÛÛ[]››İOËš[J
+_	ÔÚ[ˆÛÛ˜Ù\ÉÎÃBˆ›ÙKœ]Y\TÙ[XİÜŠ	Ëš\İÜKX˜[[˜ÙH‰ÊK^ÛÛ[S[X™\‹š\Ñš[š]J˜˜[[˜ÙP™Y›Ü™JOØ	Ù›]
+˜˜[[˜ÙP™Y›Ü™J_HÜ˜‰Ó›È™YÚ\İ˜YÉÎÃBˆ›ÙKœ]Y\TÙ[XİÜŠ	Ëš\İÜKX˜[[˜ÙIÊK˜Û\ÜÓ\İÙÙÛJ	Ø˜[[˜ÙK][˜]˜Z[X›IËS[X™\‹š\Ñš[š]J˜˜[[˜ÙP™Y›Ü™JJNÚÜİ˜\[™
+›ÙJCBˆJNÃBˆ	
+	Ú\İÜP[	ÊKšY[Y]Kš\İÜK›[™İLÎÉ
+	Ú\İÜP[	ÊKš[›™\’SZ\İÜQ^[™YÉÓSÔÕTˆ‘PÒQS•TÈÜ[¸¡¤OÜÜ[‰Î‰Õ‘TˆTÕÔ’PSÓÓTUÈÜ[¸¡¤ÜÜ[‰ÃBˆCBˆ[˜İ[Ûˆ[ÙQÜ™Y[ŠYÏVÉİØ[]˜[YIË	Ú][\Õ˜[YIË	Ú\İÜS\İ	×J^ÚYË™›Ü‘XXÚ
+YOØÛÛœİ[I
+Y
+NÚYŠY[
+\™]\›Ù[˜Û\ÜÓ\İœ™[[İ™J	İ\›Z[˜[\[ÙIÊNİ›ÚY[›Ù™œÙ]ÚYÙ[˜Û\ÜÓ\İ˜Y
+	İ\›Z[˜[\[ÙIÊNÜÙ][Y[İ]
+
+
+OO™[˜Û\ÜÓ\İœ™[[İ™J	İ\›Z[˜[\[ÙIÊKL
+_J_CBˆ[˜İ[ÛˆØ]™U˜[œØXİ[ÛŠ
+^ØÛÛœİÏXØ[Ê
+K]˜Z[X›OY]Kš[™[ÜVØËœ›ÙXİ_ÚYŠ[ÙOOOIØ^IÉ‰˜Ëİ[™]KØ[]
+^Ø[\
+	ÓHØ\\˜H›ÈY[™HÜ°êY]ÜÈİYšXÚY[\È\˜H\İHÛÛ\˜K‰ÊNÜ™]\›ŸZYŠ[ÙOOOIÜÙ[	É‰˜Ëœ]O˜]˜Z[X›J^Ø[\
+[™[\š[È[œİYšXÚY[Nˆ^H	Ø]˜Z[X›_HYËˆH	Ü›ÙXİ˜[YJËœ›ÙXİ
+_K˜
+NÜ™]\›ŸXÛÛœİ˜[[˜ÙP™Y›Ü™OY]KØ[]Ù]K[™Ï^İØ[]™]KØ[][™[ÜNœİXİ\™YÛÛ™J]Kš[™[ÜJKÚ\ÎœİXİ\™YÛÛ™J]KœÚ\ß×JK\İÜNœİXİ\™YÛÛ™J]Kš\İÜJ_NÙ]KØ[]
+Ï[[ÙOOOIØ^IÏËXËİ[˜Ëİ[Ù]Kš[™[ÜVØËœ›ÙXİOJ]Kš[™[ÜVØËœ›ÙXİ_
+JÊ[ÙOOOIØ^IÏØËœ]N‹XËœ]JNÙ]Kš\İÜK[œÚY
+ÚY˜Ü\Ëœ˜[™ÛUURQ
+
+K]N›™]È]J
+KÒTÓÔİš[™Ê
+K[ÙK›ÙXİ˜Ëœ›ÙXİ]N˜Ëœ]Kİ[˜Ëİ[›Û˜Ëœ›Û˜]N˜Ëœ˜]K[š]˜Ë[š]˜[[˜ÙP™Y›Ü™K›İN˜	Û[ÙOOOIØ^IÏÉĞÛÛ\˜IÎ‰Õ™[IßHH	Ü›ÙXİ˜[YJËœ›ÙXİ
+_XJNÜ\œÚ\İ
+
+NÜ[ÙQÜ™Y[Š
+NÉ
+	ØÛÛ™š\›QX[ÙÉÊK˜ÛÜÙJ
+NÜ™\Ù]˜YQ›Ü›J
+_CBˆ[˜İ[ÛˆØ]™PÜ™Y]
+
+^ÚYŠ\[™[™ĞÜ™Y]
+\™]\›ØÛÛœİÙ\™Xİ[Û‹[[İ[›İ_O\[™[™ĞÜ™Y]ÚYŠ\™Xİ[ÛOOIÜ™[[İ™IÉ‰˜[[İ[™]KØ[]
+^Ø[\
+	Ó›ÈÙHYY[ˆ]Z]\ˆpè\ÈÜ°êY]ÜÈHÜÈ\ÜÛšX›\È[ˆHØ\\˜K‰ÊNÜ™]\›ŸXÛÛœİ˜[[˜ÙP™Y›Ü™OY]KØ[]Ù]K[™Ï^İØ[]™]KØ[][™[ÜNœİXİ\™YÛÛ™J]Kš[™[ÜJKÚ\ÎœİXİ\™YÛÛ™J]KœÚ\ß×JK\İÜNœİXİ\™YÛÛ™J]Kš\İÜJ_NÙ]KØ[]
+ÏY\™Xİ[ÛOOIØY	ÏØ[[İ[‹X[[İ[Ù]Kš\İÜK[œÚY
+ÚY˜Ü\Ëœ˜[™ÛUURQ
+
+K]N›™]È]J
+KÒTÓÔİš[™Ê
+K\N‰ØÜ™Y]	Ë\™Xİ[Û‹[[İ[›İK˜[[˜ÙP™Y›Ü™_JNÜ[™[™ĞÜ™Y][[Ü\œÚ\İ
+
+NÜ[ÙQÜ™Y[ŠÉİØ[]˜[YIË	Ú\İÜS\İ	×JNÉ
+	ØÛÛ™š\›QX[ÙÉÊK˜ÛÜÙJ
+_CBˆ[˜İ[Ûˆ\ÚĞÜ™Y]ÛÛ™š\›J
+^ØÛÛœİ[[İ[S[X™\Š	
+	ØÜ™Y][[İ[	ÊK˜[YJK›İOI
+	ØÜ™Y]›İIÊK˜[YKš[J
+NÚYŠS[X™\‹š\Ñš[š]J[[İ[
+_[[İ[L
+^Ø[\
+	Ò[›ÙXÙH[ˆ[\ÜHHÜ°êY]ÜÈ°è[YË‰ÊNÜ™]\›ŸZYŠÜ™Y][ÙOOOIÜ™[[İ™IÉ‰˜[[İ[™]KØ[]
+^Ø[\
+	Ó›ÈÙHYY[ˆ]Z]\ˆpè\ÈÜ°êY]ÜÈHÜÈ\ÜÛšX›\È[ˆHØ\\˜K‰ÊNÜ™]\›Ÿ\[™[™ĞÜ™Y]^Ù\™Xİ[Û˜Ü™Y][ÙK[[İ[›İ_NÉ
+	ÙX[ÙÕ]IÊK^ÛÛ[XÜ™Y][ÙOOOIØY	ÏÉĞÛÛ™š\›X\ˆÜ°êY]ÜÈpìXYYÜÉÎ‰ĞÛÛ™š\›X\ˆÜ°êY]ÜÈ]Z]YÜÉÎÉ
+	ÙX[ÙÔİ[[X\IÊK^ÛÛ[X	ØÜ™Y][ÙOOOIØY	ÏÉĞpìXY\‰Î‰Ô]Z]\‰ßH	Ù›]
+[[İ[
+_HÜ‰Û›İOØ0­È	Û›İ_X‰ÉßKˆ\İHZ\İHØ[XšX\°èHÛÛÈHØ\\˜HH]YY\°èH™YÚ\İ˜YÈ[ˆHXİ]šYY˜É
+	ÙX[ÙĞÛÛ™š\›IÊK^ÛÛ[XÜ™Y][ÙOOOIØY	ÏÉĞpäPQTˆÔ°âQUÔÉÎ‰ÔURUTˆÔ°âQUÔÉÎÉ
+	ÙX[ÙĞÛÛ™š\›IÊK˜Û\ÜÓ˜[YOXÛÛ™š\›KX]Ûˆ	ØÜ™Y][ÙOOOIØY	ÏÉØ^KXÛÛ™š\›IÎ‰ÜÙ[XÛÛ™š\›IßXÉ
+	ØÛÛ™š\›QX[ÙÉÊKœÚİÓ[Ù[
+
+_CBˆ[˜İ[Ûˆ\ÚĞÛÛ™š\›J
+^Ü[™[™ĞÜ™Y][[ØÛÛœİÏXØ[Ê
+NÚYŠËœ›ÛOO[[
+^Ø[\
+	Ò[›ÙXÙHH\˜YHİ[‰ÊNÉ
+	Ü›Û	ÊK™›Øİ\Ê
+NÜ™]\›ŸZYŠËœšXÙOOO[[ËœšXÙO
+^Ø[\
+	Ò[›ÙXÙH[ˆ™XÚ[È˜\ÙH°è[YË‰ÊNÉ
+	ÜšXÙIÊK™›Øİ\Ê
+NÜ™]\›ŸZYŠËœXÚÜÏOO[[ËœXÚÜÏJ^Ø[\
+	Ò[›ÙXÙH[ˆ°î›Y\›ÈHXÚÜÈ°è[YË‰ÊNÉ
+	ÜXÚÜÉÊK™›Øİ\Ê
+NÜ™]\›ŸZYŠËœXÚÔÚ^™OOO[[ËœXÚÔÚ^™OJ^Ø[\
+	Ò[›ÙXÙH\È[šYY\ÈÜˆXÚË‰ÊNÉ
+	ÜXÚÔÚ^™IÊK™›Øİ\Ê
+NÜ™]\›ŸZYŠXËœ›ÙXİ
+^Ø[\
+	ÔÙ[XØÚ[Û˜H[\ÈHY\˜Ø[˜ğëXK‰ÊNÉ
+	Ü›ÙXİ	ÊK™›Øİ\Ê
+NÜ™]\›ŸZYŠ[ÙOOOIØ^IÉ‰˜Ëİ[™]KØ[]
+^Ø[\
+	ÓHØ\\˜H›ÈY[™HÜ°êY]ÜÈİYšXÚY[\È\˜H\İHÛÛ\˜K‰ÊNÜ™]\›ŸZYŠ[ÙOOOIÜÙ[	É‰˜Ëœ]OŠ]Kš[™[ÜVØËœ›ÙXİ_
+J^Ø[\
+[™[\š[È[œİYšXÚY[Nˆ^H	Ù]Kš[™[ÜVØËœ›ÙXİ_HYËˆH	Ü›ÙXİ˜[YJËœ›ÙXİ
+_K˜
+NÜ™]\›ŸI
+	ÙX[ÙÕ]IÊK^ÛÛ[[[ÙOOOIØ^IÏÉĞÛÛ™š\›X\ˆÛÛ\˜IÎ‰ĞÛÛ™š\›X\ˆ™[IÎÉ
+	ÙX[ÙÔİ[[X\IÊK^ÛÛ[X	Û[ÙOOOIØ^IÏÉĞÛÛ\˜\‰Î‰Õ™[™\‰ßH	İÚÛJËœ]J_HYËˆH	Ü›ÙXİ˜[YJËœ›ÙXİ
+_HÜˆ	Ù›]
+Ëİ[
+_HÜˆ
+	Ù›]
+Ëœ˜]J_IHH\šY˜JKˆ	Û[ÙOOOIØ^IÏÉÓHØ\\˜H\ÛZ[Z\°èHH[[™[\š[È][Y[\°èK‰Î‰ÓHØ\\˜H][Y[\°èHH[[™[\š[È\ÛZ[Z\°èK‰ßXÉ
+	ÙX[ÙĞÛÛ™š\›IÊK^ÛÛ[IĞTPĞTˆÔTPÒpäÓ‰ÎÉ
+	ÙX[ÙĞÛÛ™š\›IÊK˜Û\ÜÓ˜[YOXÛÛ™š\›KX]Ûˆ	Û[ÙOOOIØ^IÏÉØ^KXÛÛ™š\›IÎ‰ÜÙ[XÛÛ™š\›IßXÉ
+	ØÛÛ™š\›QX[ÙÉÊKœÚİÓ[Ù[
+
+_CBˆ[˜İ[ÛˆY]İØÚÊÙ^KX™[
+^ÙY]Xİ[ÛJ
+OOÙ]Kš[™[ÜVÚÙ^WOSX]›X^
+X][˜Ê[X™\Š	
+	ÙY]˜[YIÊK˜[YJ_
+JNÜ\œÚ\İ
+
+_NÉ
+	ÙY]]IÊK^ÛÛ[XY]\ˆ	ÛX™[XÉ
+	ÙY]X™[	ÊK^ÛÛ[IÕS’QQTÈSˆS•‘S•T’SÉÎÉ
+	ÙY]˜[YIÊK˜[YOY]Kš[™[ÜVÚÙ^W_É
+	ÙY]X[ÙÉÊKœÚİÓ[Ù[
+
+_CBˆ	
+	ÜŞ\İ[TÙX\˜Ú›Ü›IÊK›ÛœİX›Z]YOOÙKœ™]™[Y˜][
+
+NØÛÛœİ]Y\OI
+	ÜŞ\İ[TÙX\˜Ú	ÊK˜[YKš[J
+NÚYŠ]Y\J\ÙX\˜ÚŞ\İ[J]Y\J_NÃBˆ	
+	İ˜]™[\”ÙX\˜Ú	ÊK˜Y]™[\İ[™\Š	Ú[œ]	Ë™[™\•˜]™[\’[™^
+NÉ
+	İ˜]™[\Ø]YÛÜIÊK˜Y]™[\İ[™\Š	ØÚ[™ÙIË™[™\•˜]™[\’[™^
+NÃBˆ	
+	Ø^S[ÙIÊK›Û˜ÛXÚÏJ
+OOÛ[ÙOIØ^IÎØØ[İ[]UšY]Ê
+_NÉ
+	ÜÙ[[ÙIÊK›Û˜ÛXÚÏJ
+OOÛ[ÙOIÜÙ[	ÎØØ[İ[]UšY]Ê
+_NÖÉÜ›Û	Ë	ÜšXÙIË	ÜXÚÜÉË	ÜXÚÔÚ^™I×K™›Ü‘XXÚ
+YO‰
+Y
+K˜Y]™[\İ[™\Š	Ú[œ]	ËØ[İ[]UšY]ÊJNÉ
+	Ü›ÙXİ	ÊK›Û˜Ú[™ÙOXØ[İ[]UšY]ÎÉ
+	ØÛÛ™š\›P‰ÊK›Û˜ÛXÚÏX\ÚĞÛÛ™š\›NÉ
+	ÙX[ÙĞÛÛ™š\›IÊK›Û˜ÛXÚÏYOOÙKœ™]™[Y˜][
+
+NÚYŠ[™[™ĞÜ™Y]
+\Ø]™PÜ™Y]
+
+NÙ[ÙHYŠ[™[™Ò[™[ÜTØ[J\Ø]™R[™[ÜTØ[J
+NÙ[ÙHØ]™U˜[œØXİ[ÛŠ
+_NÉ
+	Ú\İÜP[	ÊK›Û˜ÛXÚÏJ
+OOÚ\İÜQ^[™YHZ\İÜQ^[™YÜ™[™\’\İÜJ
+_NÉ
+	İ[™Ğ‰ÊK›Û˜ÛXÚÏJ
+OOÚYŠY]K[™Ê\™]\›Ù]KØ[]Y]K[™ËØ[]Ù]Kš[™[ÜOY]K[™Ëš[™[ÜNÙ]Kš[™[ÜQ]Z[ÏY]K[™Ëš[™[ÜQ]Z[ß]Kš[™[ÜQ]Z[ÎÙ]KœÚ\ÏY]K[™ËœÚ\ß]KœÚ\ÎÙ]Kš\İÜOY]K[™Ëš\İÜNÙ]K[™Ï[[ÚYŠXİ]™R[™[ÜRÙ^J^É
+	Ú[™[ÜU[š]ÉÊK˜[YOY]Kš[™[ÜVØXİ]™R[™[ÜRÙ^W_É
+	Ú[™[ÜTXÚÔÚ^™IÊK˜[YOY]Kš[™[ÜQ]Z[ÖØXİ]™R[™[ÜRÙ^WOËœXÚÔÚ^™_NÉ
+	Ú[™[ÜU[š]˜[YIÊK˜[YOY]Kš[™[ÜQ]Z[ÖØXİ]™R[™[ÜRÙ^WOË[š]˜[Y_	Éß\\œÚ\İ
+
+_NÃBˆ	
+	ØÜ™Y]Y[ÙIÊK›Û˜ÛXÚÏJ
+OOØÜ™Y][ÙOIØY	ÎÉ
+	ØÜ™Y]Y[ÙIÊK˜Û\ÜÓ˜[YOIÛ[ÙHXİ]™KX^IÎÉ
+	ØÜ™Y]™[[İ™S[ÙIÊK˜Û\ÜÓ˜[YOIÛ[ÙIÎÉ
+	ØÜ™Y]ÛÛ™š\›IÊK˜Û\ÜÓ˜[YOIØÛÛ™š\›KX]Ûˆ^KXÛÛ™š\›IÎÉ
+	ØÜ™Y]\œ›İÉÊK^ÛÛ[Iûï"ÉÎÉ
+	ØÜ™Y]ÛÛ™š\›U^	ÊK^ÛÛ[IĞÓÓ‘’T“PTˆS‘Ô‘TÓÉßNÉ
+	ØÜ™Y]™[[İ™S[ÙIÊK›Û˜ÛXÚÏJ
+OOØÜ™Y][ÙOIÜ™[[İ™IÎÉ
+	ØÜ™Y]Y[ÙIÊK˜Û\ÜÓ˜[YOIÛ[ÙIÎÉ
+	ØÜ™Y]™[[İ™S[ÙIÊK˜Û\ÜÓ˜[YOIÛ[ÙHXİ]™K\Ù[	ÎÉ
+	ØÜ™Y]ÛÛ™š\›IÊK˜Û\ÜÓ˜[YOIØÛÛ™š\›KX]ÛˆÙ[XÛÛ™š\›IÎÉ
+	ØÜ™Y]\œ›İÉÊK^ÛÛ[Iø¢$‰ÎÉ
+	ØÜ™Y]ÛÛ™š\›U^	ÊK^ÛÛ[IĞÓÓ‘’T“PTˆ0âT‘QIßNÉ
+	ØÜ™Y]ÛÛ™š\›IÊK›Û˜ÛXÚÏX\ÚĞÜ™Y]ÛÛ™š\›NÃBˆ	
+	ÙY]Ø[]	ÊK›Û˜ÛXÚÏJ
+OOÙY]Xİ[ÛJ
+OOØÛÛœİ™Y›Ü™OY]KØ[]™^SX]›X^
+[X™\Š	
+	ÙY]˜[YIÊK˜[YJ_
+NÚYŠ™^OOX™Y›Ü™J^Ù]K[™Ï^İØ[]˜™Y›Ü™K[™[ÜNœİXİ\™YÛÛ™J]Kš[™[ÜJK[™[ÜQ]Z[ÎœİXİ\™YÛÛ™J]Kš[™[ÜQ]Z[ÊKÚ\ÎœİXİ\™YÛÛ™J]KœÚ\ß×JK\İÜNœİXİ\™YÛÛ™J]Kš\İÜJ_NÙ]KØ[][™^Ù]Kš\İÜK[œÚY
+ÚY˜Ü\Ëœ˜[™ÛUURQ
+
+K]N›™]È]J
+KÒTÓÔİš[™Ê
+K\N‰ØÜ™Y]	Ë\™Xİ[Û›™^˜™Y›Ü™OÉØY	Î‰Ü™[[İ™IË[[İ[“X]˜XœÊ™^X™Y›Ü™JK˜[[˜ÙP™Y›Ü™N˜™Y›Ü™K›İN‰ĞZ\İHX[X[HØ\\˜IßJ_\\œÚ\İ
+
+_NÉ
+	ÙY]]IÊK^ÛÛ[IÑY]\ˆØ\\˜IÎÉ
+	ÙY]X™[	ÊK^ÛÛ[IĞÔ°âQUÔÈTÔÓ’P“TÉÎÉ
+	ÙY]˜[YIÊK˜[YOY]KØ[]É
+	ÙY]X[ÙÉÊKœÚİÓ[Ù[
+
+_NÉ
+	ÙY]Ø]™IÊK›Û˜ÛXÚÏYOOÙKœ™]™[Y˜][
+
+NÙY]Xİ[ÛËŠ
+NÉ
+	ÙY]X[ÙÉÊK˜ÛÜÙJ
+_NÉ
+	ØYİØÚÉÊK›Û˜ÛXÚÏJ
+OOÉ
+	ØY][S˜[YIÊK˜[YOIÉÎÉ
+	ØY][T]X[]IÊK˜[YOIÌIÎÉ
+	ØY][TXÚÔÚ^™IÊK˜[YOIÉÎÉ
+	ØY][U[š]˜[YIÊK˜[YOIÉÎÉ
+	ØY][QX[ÙÉÊKœÚİÓ[Ù[
+
+_NÉ
+	ØY][Q›Ü›IÊK›ÛœİX›Z]YOOÙKœ™]™[Y˜][
+
+NØÛÛœİ˜[YOI
+	ØY][S˜[YIÊK˜[YKš[J
+K]X[]OSX][˜Ê[X™\Š	
+	ØY][T]X[]IÊK˜[YJJK›Ü›X[^™Y[˜[YKÓØØ[SİÙ\Ø\ÙJ	Ù\ÉÊKİ[™\™SØš™Xİ™[šY\ÊØ]YÛÜšY\ÊK™š[™
+
+ËØ]™Y˜[YWJOOœØ]™Y˜[YKÓØØ[SİÙ\Ø\ÙJ	Ù\ÉÊOOO[›Ü›X[^™Y
+K^\İ[™ÏSØš™Xİ™[šY\Ê]K˜İ\İÛJK™š[™
+
+ËØ]™Y˜[YWJOOœØ]™Y˜[YKš[J
+KÓØØ[SİÙ\Ø\ÙJ	Ù\ÉÊOOO[›Ü›X[^™Y
+KÙ^O\İ[™\™Ë–Ì_^\İ[™ÏË–Ì_İ\İÛWÉØÜ\Ëœ˜[™ÛUURQ
+
+_XØ]™Y]Z[ÏY]Kš[™[ÜQ]Z[ÖÚÙ^W_ßKXÚÔÚ^™OSX]›X^
+KX][˜Ê[X™\Š	
+	ØY][TXÚÔÚ^™IÊK˜[YJ_Ø]™Y]Z[ËœXÚÔÚ^™_JJK[š]˜[YOSX]›X^
+[X™\Š	
+	ØY][U[š]˜[YIÊK˜[YJ_Ø]™Y]Z[Ë[š]˜[Y_
+NÚYŠ[˜[Y_S[X™\‹š\Ñš[š]J]X[]J_]X[]OJ\™]\›ÚYŠ\İ[™\™	‰ˆY^\İ[™ÊY]K˜İ\İÛVÚÙ^WO[˜[YNÙ]Kš[™[ÜVÚÙ^WOJ]Kš[™[ÜVÚÙ^W_
+JÜ]X[]NÙ]Kš[™[ÜQ]Z[ÖÚÙ^WO^ÜXÚÔÚ^™K[š]˜[Y_NÜ\œÚ\İ
+
+NÉ
+	ØY][QX[ÙÉÊK˜ÛÜÙJ
+_NÃBˆ	
+	Ú[™[ÜP˜XÚĞ]Û‰ÊK›Û˜ÛXÚÏXÛÜÙR[™[ÜQ]Z[É
+	Ú[™[ÜTØ]™P]Û‰ÊK›Û˜ÛXÚÏ\Ø]™R[™[ÜQ]Z[ÎÉ
+	Ú[™[ÜTØ[S[ÙIÊK›Û˜Ú[™ÙOJ
+OOÉ
+	Ú[™[ÜTØ[T›ÛšY[	ÊKšY[I
+	Ú[™[ÜTØ[S[ÙIÊK˜[YHOOIØÛÛ[Y\˜ÚX[	ÎØØ[İ[]R[™[ÜTØ[J
+_NÖÉÚ[™[ÜU[š]ÉË	Ú[™[ÜTXÚÔÚ^™IË	Ú[™[ÜU[š]˜[YIË	Ú[™[ÜTØ[TXÚÜÉË	Ú[™[ÜTØ[T›Û	×K™›Ü‘XXÚ
+YO‰
+Y
+K˜Y]™[\İ[™\Š	Ú[œ]	ËØ[İ[]R[™[ÜTØ[JJNÉ
+	Ú[™[ÜTØ[PXİ[Û‰ÊK›Û˜ÛXÚÏX\ÚÒ[™[ÜTØ[NÃBˆ	
+	Ø\ÛYP]Û‰ÊK›Û˜ÛXÚÏJ
+OO˜[œÚ][Û•Ê	Õ“Ó’QS‘ÈHTÈTPĞPÒSÓ‘TÉËÜ[\ÛYKML
+NÃBˆØİ[Y[˜Y]™[\İ[™\Š	ØÛXÚÉË]™[OØÛÛœİ]ÛY]™[\™Ù]˜ÛÜÙ\İ
+	Ø]Û‰ÊNÚYŠX]ÛŸ]Û‹™\ØX›Y
+\™]\›Ø]Û‹˜Û\ÜÓ\İœ™[[İ™J	Ø]Û‹\[ÙIÊNİ›ÚY]Û‹›Ù™œÙ]ÚYØ]Û‹˜Û\ÜÓ\İ˜Y
+	Ø]Û‹\[ÙIÊNØÛÛœİÛX\”[ÙOX[š[X][Û‘]™[OÚYŠ[š[X][Û‘]™[\™Ù]OOX]ÛŸ[š[X][Û‘]™[˜[š[X][Û“˜[YHOOIÛ™^ËX]Û‹\[ÙIÊ\™]\›Ø]Û‹˜Û\ÜÓ\İœ™[[İ™J	Ø]Û‹\[ÙIÊNØ]Û‹œ™[[İ™Q]™[\İ[™\Š	Ø[š[X][Û™[™	ËÛX\”[ÙJ_NØ]Û‹˜Y]™[\İ[™\Š	Ø[š[X][Û™[™	ËÛX\”[ÙJ_KYJNÃBˆ	
+	ÙØ[Y\Ğ‰ÊK›Û˜ÛXÚÏJ
+OO˜[œÚ][Û•Ê	ĞP”’QS‘ÈT•QTÉËÚİÑØ[Y\ËLL
+NÉ
+	Û™^ÒÛYIÊK›Û˜ÛXÚÏY]™[OÙ]™[œ™]™[Y˜][
+
+NÚYŠI
+	Ø\ÛÜšÜÜXÙIÊKšY[Š]˜[œÚ][Û•Ê	Õ“Ó’QS‘ÈHHIËÜ[\ÛYKLL
+_NÙØİ[Y[œ]Y\TÙ[XİÜ[
+	ÖÙ]K[Ü[‹X\IÊK™›Ü‘XXÚ
+]ÛO˜]Û‹›Û˜ÛXÚÏJ
+OOœÚİĞ\
+]Û‹™]\Ù]›Ü[\
+JNÉ
+	Ü]ZXÚĞ\Ğ]Û‰ÊK›Û˜ÛXÚÏJ
+OOØÛÛœİY[OI
+	Ü]ZXÚĞ\ÓY[IÊNÛY[KšY[H[Y[KšY[É
+	Ü]ZXÚĞ\Ğ]Û‰ÊKœÙ]]šX]J	Ø\šXKY^[™Y	Ëİš[™Ê[Y[KšY[ŠJ_NÙØİ[Y[œ]Y\TÙ[XİÜ[
+	ÈÜ]ZXÚĞ\ÓY[HÙ]K[Ü[‹X\IÊK™›Ü‘XXÚ
+]ÛO˜]Û‹›Û˜ÛXÚÏJ
+OOÉ
+	Ü]ZXÚĞ\ÓY[IÊKšY[]YNÉ
+	Ü]ZXÚĞ\Ğ]Û‰ÊKœÙ]]šX]J	Ø\šXKY^[™Y	Ë	Ù˜[ÙIÊNÜÚİĞ\
+]Û‹™]\Ù]›Ü[\
+_JNÙØİ[Y[˜Y]™[\İ[™\Š	ØÛXÚÉË]™[OÚYŠY]™[\™Ù]˜ÛÜÙ\İ
+	Ëœ]ZXÚËX\ÉÊJ^É
+	Ü]ZXÚĞ\ÓY[IÊKšY[]YNÉ
+	Ü]ZXÚĞ\Ğ]Û‰ÊKœÙ]]šX]J	Ø\šXKY^[™Y	Ë	Ù˜[ÙIÊ__JNÉ
+	Û™]ĞØ[\ZYÛ‘›Ü›IÊK›ÛœİX›Z]YOOÙKœ™]™[Y˜][
+
+NØÛÛœİ˜[YOI
+	Û™]ĞØ[\ZYÛ“˜[YIÊK˜[YKš[J
+NÚYŠ[˜[YJ\™]\›ØÛÛœİYXÜ\Ëœ˜[™ÛUURQ
+
+NØÛÛœİİ]O\İXİ\™YÛÛ™JY˜][ÊNÜİ]KØ[]LÜİÜ™K˜Ø[\ZYÛœËœ\Ú
+ÚY˜[YKÜ™X]Y]›™]È]J
+KÒTÓÔİš[™Ê
+K]Nœİ]_JNÉ
+	Û™]ĞØ[\ZYÛ“˜[YIÊK˜[YOIÉÎİ˜[œÚ][Û•Ê	ĞÔ‘PS‘ÈT•QIË
+
+OO›Ü[‘Ø[YJY
+KLŒ
+_NÉ
+	Ü™[˜[YPØ[\ZYÛ‘›Ü›IÊK›ÛœİX›Z]YOOÙKœ™]™[Y˜][
+
+NØÛÛœİØ[\ZYÛ\İÜ™K˜Ø[\ZYÛœË™š[™
+ÏO˜ËšYOOI
+	Ü™[˜[YPØ[\ZYÛ‘X[ÙÉÊK™]\Ù]˜Ø[\ZYÛ’Y
+K˜[YOI
+	Ü™[˜[YPØ[\ZYÛ“˜[YIÊK˜[YKš[J
+NÚYŠXØ[\ZYÛŸ[˜[YJ\™]\›ØØ[\ZYÛ‹›˜[YO[˜[YNÜØ]™SØØ[İÜ™J
+NÜ]Y]YPÛİYØ]™JØ[\ZYÛŠNÉ
+	Ü™[˜[YPØ[\ZYÛ‘X[ÙÉÊK˜ÛÜÙJ
+NÜ™[™\Ø[\ZYÛœÊ
+NÚYŠØ[\ZYÛ‹šYOOXXİ]™RY
+\™[™\Š
+_NÃBˆ	
+	ØY›İP]Û‰ÊK›Û˜ÛXÚÏJ
+OO›Ü[“›İJ
+NÉ
+	ÜØ]™S›İP]Û‰ÊK›Û˜ÛXÚÏJ
+OOœØ]™S›İJYJNÉ
+	ØÛÜÙS›İP]Û‰ÊK›Û˜ÛXÚÏJ
+OOœØ]™S›İJYJNÉ
+	Ù[]S›İP]Û‰ÊK›Û˜ÛXÚÏY[]S›İNÖÉ
+	Û›İU]IÊK	
+	Û›İP›ÙIÊWK™›Ü‘XXÚ
+[œ]Oš[œ]˜Y]™[\İ[™\Š	Ú[œ]	Ë
+
+OOÉ
+	Û›İTØ]™Tİ]\ÉÊK^ÛÛ[IĞĞSP’SÔÈÒSˆÕPT‘T‰ßJJNÃBˆ	
+	Ø˜XÚİ\‰ÊK›Û˜ÛXÚÏJ
+OO‰
+	Ø˜XÚİ\X[ÙÉÊKœÚİÓ[Ù[
+
+NÉ
+	Ù^Ü‰ÊK›Û˜ÛXÚÏJ
+OOØÛÛœİ›Ø[™]È›ØŠÒ”ÓÓ‹œİš[™ÚYJØ\‰Ó‘VÉË™\œÚ[ÛŒK^ÜY]›™]È]J
+KÒTÓÔİš[™Ê
+K]NË‹‹™]K[™Î›[_K[ŠWKİ\N‰Ø\XØ][Û‹ÚœÛÛ‰ßJKOYØİ[Y[˜Ü™X]Q[[Y[
+	ØIÊNØKš™YUT“˜Ü™X]SØš™XİT“
+›ØŠNØK™İÛ›ØYX™^ËX˜XÚİ\IÛ™]È]J
+KÒTÓÔİš[™Ê
+KœÛXÙJL
+_KšœÛÛ˜ØK˜ÛXÚÊ
+NÕT“œ™]›ÚÙSØš™XİT“
+Kš™YŠNÉ
+	Ø˜XÚİ\İ]\ÉÊK^ÛÛ[IĞÛÜXH^ÜYK‰ßNÉ
+	Ú[\Ü[œ]	ÊK›Û˜Ú[™ÙOX\Ş[˜ÈOOİ^ØÛÛœİš[OYK\™Ù]™š[\ÖÌNÚYŠYš[J\™]\›ØÛÛœİ\œÙYR”ÓÓ‹œ\œÙJ]ØZ]š[K^
+
+JK[˜ÛÛZ[™Ï\\œÙY™]_\œÙYÚYŠ\[Ùˆ[˜ÛÛZ[™ËØ[]OOIÛ[X™\‰ßZ[˜ÛÛZ[™Ëš[™[ÜJ]›İÈ\œ›ÜŠ	Ñ›Ü›X]È›È°è[YÉÊNÙ]O[›Ü›X[^™Tİ]J[˜ÛÛZ[™ÊNÜ\œÚ\İ
+
+NÉ
+	Ø˜XÚİ\İ]\ÉÊK^ÛÛ[IĞÛÜXH[\ÜYHÛÜœ™Xİ[Y[K‰ßXØ]ÚÉ
+	Ø˜XÚİ\İ]\ÉÊK^ÛÛ[IÓ›ÈÙHYÈ[\Ü\ˆ\˜Ú]›È[°è[YË‰ßYK\™Ù]˜[YOIÉßNÃBˆYŠÛİYÛY[
+^É
+	Ø]]›Ü›IÊK›ÛœİX›Z]X\Ş[˜ÈOOÙKœ™]™[Y˜][
+
+NØÛÛœİ[XZ[I
+	Ø]][XZ[	ÊK˜[YKš[J
+KÓİÙ\Ø\ÙJ
+K\ÜİÛÜ™I
+	Ø]]\ÜİÛÜ™	ÊK˜[YKÚYÛš[™Õ\X]][ÙOOOIÜÚYÛ\	ÎÉ
+	Ø]]İX›Z]	ÊK™\ØX›Y]YNÜÙ]]]Y\ÜØYÙJ	ÉÊNİ^ÚYŠ]][ÙOOOIÜ™XÛİ™\IÊ^ØÛÛœİÙ\œ›ÜŸOX]ØZ]ÛİYÛY[˜]]œ™\Ù]\ÜİÛÜ™›Ü‘[XZ[
+[XZ[Ü™Y\™XİÎœÚ]U\›JNÚYŠ\œ›ÜŠ]›İÈ\œ›ÜÜÙ]]]Y\ÜØYÙJ	ÔÚH^\İH[˜HİY[HÛÛˆ\ÙHÛÜœ™[Ë™XÚXš\°è\È[ˆ[›XÙH\˜H™Xİ\\˜\ˆHÛÛ˜\ÙpìXK‰ÊNÜ™]\›ŸZYŠ]][ÙOOOIÛ™]Ë\\ÜİÛÜ™	Ê^ÚYŠ\ÜİÛÜ™›[™İ
+]›İÈ\œ›ÜŠ	ÓHÛÛ˜\ÙpìXHX™H[™\ˆ[Y[›ÜÈØ\˜Xİ\™\Ë‰ÊNØÛÛœİÙ]Nœ™\İ[\œ›ÜŸOX]ØZ]ÛİYÛY[˜]]\]U\Ù\ŠÜ\ÜİÛÜ™JNÚYŠ\œ›ÜŠ]›İÈ\œ›ÜÜ\ÜİÛÜ™™XÛİ™\T[™[™ÏY˜[ÙNÜÙ]]]Y\ÜØYÙJ	ĞÛÛ˜\ÙpìXHXİX[^˜YK‰ÊNØ]ØZ]Xİ]˜]PÛİYÙ\ÜÚ[ÛŠ™\İ[\Ù\ŠNÜ™]\›ŸZYŠÚYÛš[™Õ\
+^ÚYŠ\ÜİÛÜ™›[™İ
+]›İÈ\œ›ÜŠ	ÓHÛÛ˜\ÙpìXHX™H[™\ˆ[Y[›ÜÈØ\˜Xİ\™\Ë‰ÊNØÛÛœİÙ]Nœ™\İ[\œ›ÜŸOX]ØZ]ÛİYÛY[˜]]œÚYÛ•\
+Ù[XZ[\ÜİÛÜ™Ü[ÛœÎÙ[XZ[™Y\™XİÎœÚ]U\›_JNÚYŠ\œ›ÜŠ]›İÈ\œ›ÜÚYŠ™\İ[œÙ\ÜÚ[ÛË\Ù\ŠX]ØZ]Xİ]˜]PÛİYÙ\ÜÚ[ÛŠ™\İ[œÙ\ÜÚ[Û‹\Ù\ŠNÙ[ÙHÙ]]]Y\ÜØYÙJ	ĞİY[HÜ™XYKˆ™]š\ØH[ÛÜœ™[È\˜H™\šYšXØ\›H[˜H™^È\Üpê\È[˜\°è\ÈÛÛˆHÛÛ˜\ÙpìXK‰Ê_Y[Ù^ØÛÛœİÙ]Nœ™\İ[\œ›ÜŸOX]ØZ]ÛİYÛY[˜]]œÚYÛ’[•Ú]\ÜİÛÜ™
+Ù[XZ[\ÜİÛÜ™JNÚYŠ\œ›ÜŠ]›İÈ\œ›ÜØ]ØZ]Xİ]˜]PÛİYÙ\ÜÚ[ÛŠ™\İ[\Ù\Š__XØ]Ú
+\œ›ÜŠ^ÜÙ]]]Y\ÜØYÙJœšY[™P]]\œ›ÜŠ\œ›ÜŠKYJ_Yš[˜[^É
+	Ø]]İX›Z]	ÊK™\ØX›YY˜[Ù__NÉ
+	Ø]][ÙP]Û‰ÊK›Û˜ÛXÚÏJ
+OOœÙ]]][ÙJ]][ÙOOOIÜÚYÛš[‰ÏÉÜÚYÛ\	Î‰ÜÚYÛš[‰ÊNÉ
+	Ù›Ü™Ûİ\ÜİÛÜ™]Û‰ÊK›Û˜ÛXÚÏJ
+OOœÙ]]][ÙJ	Ü™XÛİ™\IÊNÉ
+	Ø]]˜XÚĞ]Û‰ÊK›Û˜ÛXÚÏJ
+OOÜ\ÜİÛÜ™™XÛİ™\T[™[™ÏY˜[ÙNÜÙ]]][ÙJ	ÜÚYÛš[‰Ê_NÉ
+	ÛØØ[[ÙP]Û‰ÊK›Û˜ÛXÚÏJ
+OOÉ
+	Ø]]Ø]IÊKšY[]YNØÛİY\Ù\[[ØÛİY™XYOY˜[ÙNÜÙ]XØÛİ[Y[]J
+NÜÙ]ÛÛ›™Xİ[ÛŠ	ÑUÔÈĞĞSTÉÊNÜÚİÑØ[Y\Ê
+_NÉ
+	ØXØÛİ[]Û‰ÊK›Û˜ÛXÚÏX\Ş[˜Ê
+OOÚYŠÛİY\Ù\Š^ÚYŠÛÛ™š\›J	ğ¯ĞÙ\œ˜\ˆÙ\ÚpìÛˆH‘VÈ[ˆ\İH\ÜÜÚ]]›ÏÉÊJX]ØZ]ÛİYÛY[˜]]œÚYÛ“İ]
+
+_Y[Ù^É
+	Ø]]Ø]IÊKšY[Y˜[ÙNÉ
+	ÙØ[YTÙ[XİÜ‰ÊKšY[]YNÉ
+	ÙØ[YP\	ÊKšY[]YNÜÙ]]][ÙJ	ÜÚYÛš[‰Ê___Y[Ù^É
+	ØXØÛİ[]Û‰ÊKšY[]Y_CBˆ	
+	ØÛÛ™š\›QX[ÙÉÊK˜Y]™[\İ[™\Š	ØÛÜÙIË
+
+OOÉ
+	ÙX[ÙĞØ[˜Ù[	ÊK^ÛÛ[IĞĞSÑST‰ÎÚYŠ	
+	ØÛÛ™š\›QX[ÙÉÊKœ™]\›•˜[YOOOIØØ[˜Ù[	ßI
+	ØÛÛ™š\›QX[ÙÉÊKœ™]\›•˜[YJ^Ü[™[™ĞÜ™Y][[Ü[™[™Ò[™[ÜTØ[O[[_JNİÚ[™İË˜Y]™[\İ[™\Š	ÜİÜ˜YÙIËOOÚYŠKšÙ^OOORÑVJ^ÜİÜ™O[ØYİÜ™J
+NØÛÛœİØ[\ZYÛ\İÜ™K˜Ø[\ZYÛœË™š[™
+ÏO˜ËšYOOXXİ]™RY
+NÚYŠØ[\ZYÛŠ^Ù]O[›Ü›X[^™Tİ]JØ[\ZYÛ‹™]JNÜ™[™\Š
+_Y[ÙHÚİÑØ[Y\Ê
+__JNİÚ[™İË˜Y]™[\İ[™\Š	Ù›Øİ\ÉË™Yœ™\ÚÛİYØ[\ZYÛœÊNÙØİ[Y[˜Y]™[\İ[™\Š	İš\ÚXš[]XÚ[™ÙIË
+
+OOÚYŠØİ[Y[š\ÚXš[]Tİ]OOOIİš\ÚX›IÊ\™Yœ™\ÚÛİYØ[\ZYÛœÊ
+_JNÚYŠ	ÜÙ\šXÙUÛÜšÙ\‰Ú[ˆ˜]šYØ]Ü‰‰›ØØ][Û‹œ›İØÛÛOOIÙš[N‰Ê[˜]šYØ]Ü‹œÙ\šXÙUÛÜšÙ\‹œ™YÚ\İ\Š	Ë‹ÜİËšœÉÊK˜Ø]Ú
+
+
+OOßJNÛ][œİ[›Û\É
+	Ú[œİ[‰ÊK›Û˜ÛXÚÏX\Ş[˜Ê
+OOÚYŠ[œİ[›Û\
+^Ú[œİ[›Û\œ›Û\
+
+NØ]ØZ][œİ[›Û\\Ù\ÚÚXÙNÚ[œİ[›Û\[[É
+	Ú[œİ[‰ÊKšY[]Y__NİÚ[™İË˜Y]™[\İ[™\Š	Ø™Y›Ü™Z[œİ[›Û\	ËOOÙKœ™]™[Y˜][
+
+NÚ[œİ[›Û\YNÉ
+	Ú[œİ[‰ÊKšY[Y˜[Ù_JNİÚ[™İË“‘V×ĞÒTPÕT—ĞTO^ÙÙ]Ú\˜Xİ\œÎŠ
+OO™]K˜Ú\˜Xİ\œß
+]K˜Ú\˜Xİ\œÏV×JKÛÛ[Z]Ú\˜Xİ\œÊ
+^ØÛÛœİØ[\ZYÛ\İÜ™K˜Ø[\ZYÛœË™š[™
+ÏO˜ËšYOOXXİ]™RY
+NÚYŠXØ[\ZYÛŠ\™]\›ØØ[\ZYÛ‹™]OY]NÜØ]™SØØ[İÜ™J
+NÜ]Y]YPÛİYØ]™JØ[\ZYÛŠ__NİÚ[™İË“‘V×ÒS‘ĞT—ĞTO^ÙÙ]Ú\ÎŠ
+OO™]KœÚ\ß
+]KœÚ\ÏV×JK›Ü›X]™›]˜]Nœ›İÔ˜]KYÚ\
+Ú\
+^Ù]KœÚ\Ë[œÚY
+Ú\
+NÜ\œÚ\İ
+
+_K[]TÚ\
+Y
+^ØÛÛœİÚ\Y]KœÚ\Ë™š[™
+][OOš][KšYOOZY
+NÚYŠ\Ú\
+\™]\›ˆ˜[ÙNÙ]K[™Ï^İØ[]™]KØ[][™[ÜNœİXİ\™YÛÛ™J]Kš[™[ÜJK[™[ÜQ]Z[ÎœİXİ\™YÛÛ™J]Kš[™[ÜQ]Z[ÊKÚ\ÎœİXİ\™YÛÛ™J]KœÚ\ÊK\İÜNœİXİ\™YÛÛ™J]Kš\İÜJ_NÙ]KœÚ\ÏY]KœÚ\Ë™š[\Š][OOš][KšYOOZY
+NÜ\œÚ\İ
+
+NÜ™]\›ˆY_KÙ[Ú\
+Yİ[›Û˜]J^ØÛÛœİÚ\Y]KœÚ\Ë™š[™
+][OOš][KšYOOZY
+NÚYŠ\Ú\
+\™]\›ˆ˜[ÙNØÛÛœİ˜[[˜ÙP™Y›Ü™OY]KØ[]Ù]K[™Ï^İØ[]™]KØ[][™[ÜNœİXİ\™YÛÛ™J]Kš[™[ÜJK[™[ÜQ]Z[ÎœİXİ\™YÛÛ™J]Kš[™[ÜQ]Z[ÊKÚ\ÎœİXİ\™YÛÛ™J]KœÚ\ÊK\İÜNœİXİ\™YÛÛ™J]Kš\İÜJ_NÙ]KØ[]
+Ï]İ[Ù]KœÚ\ÏY]KœÚ\Ë™š[\Š][OOš][KšYOOZY
+NÙ]Kš\İÜK[œÚY
+ÚY˜Ü\Ëœ˜[™ÛUURQ
+
+K]N›™]È]J
+KÒTÓÔİš[™Ê
+K\N‰ØÜ™Y]	Ë\™Xİ[Û‰ØY	Ë[[İ[İ[˜[[˜ÙP™Y›Ü™K›İN‰Õ™[HH˜]™H	ÊÜÚ\›˜[YJÉÈ0­ÈÙYİ[™HX[›ÉÊÊ›ÛOO[[ÉÉÎ‰È0­È\˜YH	ÊÜ›Û
+ÉÈ
+	ÊÙ›]
+˜]JJÉÉJIÊ_JNÜ\œÚ\İ
+
+NÜ[ÙQÜ™Y[ŠÉİØ[]˜[YIË	Ú\İÜS\İ	×JNÜ™]\›ˆY__NÚ[š]X[^™PÛİY
+
+NÜ^R[›Ê
+NÃBŸJJ
+NÃB
